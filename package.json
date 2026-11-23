@@ -1,0 +1,55 @@
+{
+  "name": "photo-studio",
+  "productName": "Photo Studio",
+  "version": "0.2.0",
+  "description": "Professional photo editing studio for Windows - GPU editing, curves, HSL, colour grading, presets",
+  "author": "jawedsyed64",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs && electron .",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "dist": "npm run build && electron-builder --win nsis portable --publish never"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.25.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.6.0"
+  },
+  "build": {
+    "appId": "com.jawedsyed64.photostudio",
+    "productName": "Photo Studio",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": [
+      "electron/**/*",
+      "dist/renderer/**/*",
+      "!dist/renderer/*.map",
+      "build/icon.png",
+      "package.json"
+    ],
+    "fileAssociations": [
+      { "ext": "pstudio", "name": "Photo Studio Project", "description": "Photo Studio project", "role": "Editor" }
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": ["nsis", "portable"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Photo Studio",
+      "artifactName": "PhotoStudio-Setup-${version}.${ext}"
+    },
+    "portable": { "artifactName": "PhotoStudio-Portable-${version}.${ext}" }
+  }
+}
