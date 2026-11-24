@@ -94,10 +94,32 @@ export interface AiState {
   shadow: number;     // 0..100 drop shadow under the subject
   styleId: string | null;  // AI style / AI edit result layer
   styleMix: number;   // 0..100
+  styleBlend: 'normal' | 'color'; // 'color' = take only colour from the layer (colorize)
+}
+
+export interface Face { x: number; y: number; w: number; h: number; kps: number[][] }
+export interface Retouch {
+  maskA: string | null;   // RGB = skin, eyes, teeth
+  maskB: string | null;   // RGB = hair, under-eye, whole face
+  faces: Face[];          // in working-image pixels
+  skinAvg: [number, number, number];
+  smooth: number; blemish: number; acne: number; wrinkle: number;  // 0..100
+  warmth: number;         // -100..100 skin tone
+  even: number;           // 0..100 even out skin tone
+  underEye: number; teeth: number; eyes: number; redEye: number;   // 0..100
+  faceLight: number;      // -100..100
+  lightDir: number;       // -100..100 (left .. right)
+  hair: number;           // 0..100
+}
+export interface LocalAdjust {
+  maskId: string | null;  // alpha mask painted with the local adjustment brush
+  exposure: number; contrast: number; saturation: number; temperature: number; clarity: number; // -100..100
 }
 
 export interface EditState {
   ai: AiState;
+  retouch: Retouch;
+  local: LocalAdjust;
   adjust: Adjust;
   detail: Detail;
   optics: Optics;
@@ -140,11 +162,19 @@ export const defaultGeometry = (): Geometry => ({
 
 export const defaultAi = (): AiState => ({
   baseId: null, patches: [], maskId: null, bgMode: 'keep', bgColor: '#ffffff', bgColor2: '#c8c8c8', bgGradient: 'radial',
-  bgImageId: null, bgBlur: 0, feather: 10, shift: 0, harmonize: 0, shadow: 0, styleId: null, styleMix: 100,
+  bgImageId: null, bgBlur: 0, feather: 10, shift: 0, harmonize: 0, shadow: 0, styleId: null, styleMix: 100, styleBlend: 'normal',
 });
+
+export const defaultRetouch = (): Retouch => ({
+  maskA: null, maskB: null, faces: [], skinAvg: [0.8, 0.6, 0.5],
+  smooth: 0, blemish: 0, acne: 0, wrinkle: 0, warmth: 0, even: 0, underEye: 0, teeth: 0, eyes: 0, redEye: 0, faceLight: 0, lightDir: 0, hair: 0,
+});
+export const defaultLocal = (): LocalAdjust => ({ maskId: null, exposure: 0, contrast: 0, saturation: 0, temperature: 0, clarity: 0 });
 
 export const defaultState = (): EditState => ({
   ai: defaultAi(),
+  retouch: defaultRetouch(),
+  local: defaultLocal(),
   adjust: defaultAdjust(),
   detail: defaultDetail(),
   optics: defaultOptics(),
@@ -162,6 +192,8 @@ export function normalizeState(s: any): EditState {
   if (!s || typeof s !== 'object') return d;
   return {
     ai: { ...d.ai, ...(s.ai || {}), patches: Array.isArray(s.ai?.patches) ? s.ai.patches : [] },
+    retouch: { ...d.retouch, ...(s.retouch || {}), faces: Array.isArray(s.retouch?.faces) ? s.retouch.faces : [] },
+    local: { ...d.local, ...(s.local || {}) },
     adjust: { ...d.adjust, ...(s.adjust || {}) },
     detail: { ...d.detail, ...(s.detail || {}) },
     optics: { ...d.optics, ...(s.optics || {}) },
@@ -179,10 +211,10 @@ export function normalizeState(s: any): EditState {
 }
 
 /** Parts of a state that a preset carries (no geometry). */
-export type PresetSettings = Partial<Omit<EditState, 'geometry' | 'ai'>>;
+export type PresetSettings = Partial<Omit<EditState, 'geometry' | 'ai' | 'retouch' | 'local'>>;
 
 /** All asset ids a state refers to. */
 export function assetIds(s: EditState): string[] {
-  const a = s.ai; const ids = [a.baseId, a.maskId, a.bgImageId, a.styleId, ...a.patches.map(p => p.id)];
+  const a = s.ai; const ids = [a.baseId, a.maskId, a.bgImageId, a.styleId, ...a.patches.map(p => p.id), s.retouch.maskA, s.retouch.maskB, s.local.maskId];
   return ids.filter((x): x is string => !!x);
 }

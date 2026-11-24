@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Renderer, Histogram } from '../engine/Renderer';
-import { EditState, clone, defaultState, defaultAdjust, defaultAi, normalizeState, assetIds } from '../state/types';
+import { EditState, clone, defaultState, defaultAdjust, defaultAi, defaultRetouch, defaultLocal, normalizeState, assetIds } from '../state/types';
 import { AssetStore } from '../ai/assets';
 import { useAiController } from '../ai/controller';
 import { AiPanel, BrushOverlay } from './panels/AiPanel';
+import { RetouchPanel, RestorePanel } from './panels/RetouchPanels';
 import { Icon, Planned, toast, useLatest } from './common';
 import { AdjustPanel } from './panels/AdjustPanel';
 import { CurvesPanel } from './panels/CurvesPanel';
@@ -29,13 +30,14 @@ export interface Doc {
 
 export interface RecentItem { id: string; name: string; imagePath: string | null; projectPath: string | null; thumb: string; editedAt: number }
 
-type Tool = 'ai' | 'adjust' | 'color' | 'detail' | 'retouch' | 'effects' | 'filters' | 'text' | 'stickers' | 'frames' | 'crop' | 'history';
+type Tool = 'ai' | 'adjust' | 'color' | 'detail' | 'retouch' | 'restore' | 'effects' | 'filters' | 'text' | 'stickers' | 'frames' | 'crop' | 'history';
 const TOOLS: { k: Tool; label: string; icon: string; phase?: number; pro?: boolean }[] = [
   { k: 'ai', label: 'AI Tools', icon: 'ai' },
   { k: 'adjust', label: 'Adjustments', icon: 'sliders' },
   { k: 'color', label: 'Color', icon: 'color', pro: true },
   { k: 'detail', label: 'Detail & Optics', icon: 'detail', pro: true },
-  { k: 'retouch', label: 'Retouching', icon: 'retouch', phase: 4 },
+  { k: 'retouch', label: 'Retouching', icon: 'portrait' },
+  { k: 'restore', label: 'Restoration', icon: 'restore' },
   { k: 'effects', label: 'Effects', icon: 'effects', phase: 5 },
   { k: 'filters', label: 'Filters & Presets', icon: 'filters' },
   { k: 'text', label: 'Text', icon: 'text', phase: 5 },
@@ -46,7 +48,6 @@ const TOOLS: { k: Tool; label: string; icon: string; phase?: number; pro?: boole
 ];
 
 const PLANNED: Record<string, { title: string; items: string[]; note?: string }> = {
-  retouch: { title: 'Portrait Retouching', items: ['Skin smoothing, blemish & acne removal', 'Red-eye, teeth whitening, eye enhancement', 'Healing brush, clone stamp, spot removal', 'Local adjustment brush'] },
   effects: { title: 'Creative Effects', items: ['Film & vintage looks, light leaks', 'Glitch, bokeh, soft glow, tilt-shift', 'Double exposure, colour splash', 'Artistic filters (oil, watercolour, sketch)'] },
   text: { title: 'Text & Typography', items: ['Fonts, size, bold/italic, colour', 'Spacing, shadows, outlines, labels', 'Curved text, rotation'] },
   stickers: { title: 'Stickers & Graphics', items: ['Searchable stickers, shapes, emojis', 'Badges, labels, overlays', 'Resize, rotate, recolour'] },
@@ -54,7 +55,9 @@ const PLANNED: Record<string, { title: string; items: string[]; note?: string }>
 };
 
 const GROUPS: { k: string; label: string; test: (s: EditState) => boolean; reset: (s: EditState) => void }[] = [
-  { k: 'ai', label: 'AI layers', test: s => JSON.stringify(s.ai) !== JSON.stringify(defaultAi()), reset: s => { s.ai = defaultAi(); } },
+  { k: 'retouch', label: 'Portrait retouching', test: s => JSON.stringify(s.retouch) !== JSON.stringify(defaultRetouch()), reset: s => { s.retouch = defaultRetouch(); } },
+  { k: 'local', label: 'Local adjustment', test: s => !!s.local.maskId, reset: s => { s.local = defaultLocal(); } },
+  { k: 'ai', label: 'AI layers & repairs', test: s => JSON.stringify(s.ai) !== JSON.stringify(defaultAi()), reset: s => { s.ai = defaultAi(); } },
   { k: 'adjust', label: 'Basic adjustments', test: s => JSON.stringify(s.adjust) !== JSON.stringify(defaultAdjust()), reset: s => { s.adjust = defaultAdjust(); } },
   { k: 'curves', label: 'Curves', test: s => JSON.stringify(s.curves) !== JSON.stringify(defaultState().curves), reset: s => { s.curves = defaultState().curves; } },
   { k: 'hsl', label: 'HSL', test: s => JSON.stringify(s.hsl) !== JSON.stringify(defaultState().hsl), reset: s => { s.hsl = defaultState().hsl; } },
@@ -165,7 +168,7 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
     getState: () => curRef.current, setStateLabeled, onNewDoc, onTexturesChanged: () => setTexVersion(v => v + 1),
   });
   const brushOn = !!aiCtl.brush.mode;
-  useEffect(() => { if (tool !== 'ai' && aiCtl.brush.mode) aiCtl.setBrush({ ...aiCtl.brush, mode: null }); }, [tool]);
+  useEffect(() => { if (aiCtl.brush.mode) aiCtl.setBrush({ ...aiCtl.brush, mode: null }); }, [tool]);
 
   // ---------- view geometry ----------
   const r = rendererRef.current;
@@ -291,11 +294,11 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
   };
 
   // ---------- copy / paste settings ----------
-  const copySettings = () => { const s = clone(cur); platform.set('clipboard', { ...s, geometry: undefined, ai: undefined }); toast('Edit settings copied'); };
+  const copySettings = () => { const s = clone(cur); platform.set('clipboard', { ...s, geometry: undefined, ai: undefined, retouch: undefined, local: undefined }); toast('Edit settings copied'); };
   const pasteSettings = async () => {
     const c = await platform.get<any>('clipboard', null);
     if (!c) return toast('Nothing copied yet');
-    update('Paste settings', s => { const g = s.geometry, a = s.ai; Object.assign(s, normalizeState({ ...c, geometry: g, ai: a })); });
+    update('Paste settings', s => { const g = s.geometry, a = s.ai, rt = s.retouch, lc = s.local; Object.assign(s, normalizeState({ ...c, geometry: g, ai: a, retouch: rt, local: lc })); });
   };
 
   // ---------- zoom ----------
@@ -426,8 +429,12 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
           {showOrig && <div className="ba-label" style={{ left: 12, top: 12 }}>Original</div>}
           {brushOn && ready && (
             <BrushOverlay box={{ x: ix, y: iy, w: dw, h: dh }} mode={aiCtl.brush.mode} size={aiCtl.brush.size} soft={aiCtl.brush.soft}
-              target={aiCtl.brush.mode === 'object' ? aiCtl.objMask() : aiCtl.subjMask.current} showMask={aiCtl.brush.mode === 'object' ? 'object' : 'subject'}
-              onStroke={() => { if (aiCtl.brush.mode !== 'object') aiCtl.liveMask(); }} onEnd={aiCtl.strokeEnd} />
+              target={aiCtl.paintTarget()}
+              showMask={(({ object: 'object', 'mask-add': 'subject', 'mask-erase': 'subject', spot: 'stroke', heal: 'stroke', clone: 'stroke', 'local-add': 'local', 'local-erase': 'local' } as any)[aiCtl.brush.mode!])}
+              onStart={aiCtl.strokeStart} canStroke={aiCtl.canStroke}
+              onAlt={aiCtl.brush.mode === 'heal' || aiCtl.brush.mode === 'clone' ? aiCtl.setSource : undefined}
+              sourceMark={aiCtl.brush.mode === 'heal' || aiCtl.brush.mode === 'clone' ? aiCtl.sourceMark() : null}
+              onStroke={() => aiCtl.liveMask()} onEnd={() => aiCtl.strokeEnd(doc.loaded.width / dw)} />
           )}
           {cropMode && ready && (
             <CropOverlay box={{ x: ix, y: iy, w: dw, h: dh }} frame={cropFrame} crop={cur.geometry.crop} ratio={ratio} oriented={[OW, OH]}
@@ -442,6 +449,8 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
           <div className="panel-title">{TOOLS.find(t => t.k === tool)?.label}</div>
           <div className="panel-scroll">
             {tool === 'ai' && <AiPanel state={cur} update={update} ops={aiCtl.ops} brush={aiCtl.brush} setBrush={aiCtl.setBrush} />}
+            {tool === 'retouch' && <RetouchPanel state={cur} update={update} ops={aiCtl.ops} brush={aiCtl.brush} setBrush={aiCtl.setBrush} />}
+            {tool === 'restore' && <RestorePanel state={cur} update={update} ops={aiCtl.ops} brush={aiCtl.brush} setBrush={aiCtl.setBrush} compare={compare} onCompare={() => setCompare(!compare)} />}
             {tool === 'adjust' && <AdjustPanel state={cur} update={update} pro={pro} onAuto={autoEnhance} />}
             {tool === 'color' && <>
               <div className="tabs">

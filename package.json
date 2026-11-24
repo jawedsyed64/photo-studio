@@ -1,7 +1,7 @@
 {
   "name": "photo-studio",
   "productName": "Photo Studio",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Professional photo editing studio for Windows - GPU editing, colour tools, presets and AI (background removal, object removal, upscaling, styles)",
   "author": "jawedsyed64",
   "license": "MIT",

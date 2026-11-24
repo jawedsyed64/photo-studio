@@ -53,12 +53,22 @@ uniform sampler2D uCurve;  // 256x1 combined curves LUT
 uniform sampler2D uMask;   // subject mask (alpha), source space, mipmapped
 uniform sampler2D uBg;     // background image, output space, mipmapped
 uniform sampler2D uStyle;  // AI style layer, source space
-uniform float uMaskOn, uStyleOn, uStyleMix;
+uniform float uMaskOn, uStyleOn, uStyleMix, uStyleColor;
 uniform int uBgMode;       // 0 keep 1 transparent 2 colour 3 gradient 4 image 5 blur
 uniform vec3 uBgColor, uBgColor2;
 uniform int uBgGrad;       // 0 linear 1 radial
 uniform float uBgBlur, uFeather, uShift, uHarmAmt, uShadow, uBgAspect;
 uniform vec3 uHarm;
+// retouching
+uniform sampler2D uFaceA;  // rgb = skin, eyes, teeth
+uniform sampler2D uFaceB;  // rgb = hair, under-eye, face
+uniform sampler2D uLocal;  // alpha = local adjustment mask
+uniform sampler2D uOrig;   // untouched original (for before/after when the base was changed by AI)
+uniform float uOrigOn;
+uniform float uRetouchOn, uSmooth, uBlemish, uAcne, uWrinkle, uWarmth, uEven, uUnder, uTeeth, uEyes, uRedEye, uFaceLight, uLightDir, uHairAmt;
+uniform float uSkinR, uSkinLod, uFaceCX, uFaceW;
+uniform vec3 uSkinAvg;
+uniform float uLocalOn, uLocExp, uLocContrast, uLocSat, uLocTemp, uLocClarity;
 
 // geometry
 uniform vec4 uCrop;          // x y w h in oriented normalized coords
@@ -176,7 +186,7 @@ void main() {
 
   if (outside) { o = uFill; return; }
 
-  if (uSplit >= 0.0 && uv.x < uSplit) { o = base; return; }
+  if (uSplit >= 0.0 && uv.x < uSplit) { o = uOrigOn > 0.5 ? texture(uOrig, s) : base; return; }
 
   vec3 col = vec3(rr, base.g, bb);
   float alpha = base.a;
@@ -188,7 +198,7 @@ void main() {
     float c = 0.5 - uShift * 0.4, w = 0.02 + uFeather * 0.45;
     m = smoothstep(c - w, c + w, mr);
   }
-  if (uStyleOn > 0.5) col = mix(col, texture(uStyle, s).rgb, uStyleMix);
+  if (uStyleOn > 0.5 && uStyleColor < 0.5) col = mix(col, texture(uStyle, s).rgb, uStyleMix);
   if (uMaskOn > 0.5 && uBgMode == 5) {
     vec3 bl = textureLod(uImg, s, 1.0 + uBgBlur * 6.0).rgb;
     col = mix(bl, col, m);
@@ -205,6 +215,70 @@ void main() {
     float Y = luma(col);
     vec3 ch = col - Y, chb = bN - luma(bN);
     col = Y + mix(ch, chb, uColorNR);
+  }
+
+  // --- portrait retouching (face-parsing masks) ---
+  if (uRetouchOn > 0.5) {
+    vec3 fa = texture(uFaceA, s).rgb, fb = texture(uFaceB, s).rgb;
+    float skin = fa.r, eyes = fa.g, teeth = fa.b, hair = fb.r, under = fb.g, face = fb.b;
+    vec3 wide = textureLod(uImg, s, uSkinLod + 2.0).rgb;
+    if (skin > 0.004 && uSmooth + uBlemish + uAcne + uWrinkle > 0.0) {
+      // edge-preserving (bilateral) local mean over a disk scaled to the face size
+      vec3 acc = col; float ws = 1.0;
+      for (int i = 0; i < 12; i++) {
+        float a = float(i) * 0.5236 + (i >= 6 ? 0.26 : 0.0);
+        float rr = i < 6 ? 0.5 : 1.0;
+        vec2 o = vec2(cos(a), sin(a) * uOrientSize.x / uOrientSize.y) * uSkinR * rr;
+        vec3 c = textureLod(uImg, s + o, uSkinLod).rgb;
+        vec3 dc = c - col;
+        float w = exp(-dot(dc, dc) / 0.012);
+        acc += c * w; ws += w;
+      }
+      vec3 bil = acc / ws;
+      vec3 detail = col - bil;
+      col = mix(col, bil + detail * 0.35, uSmooth * skin);                                  // smooth, keep pores
+      float dark = luma(wide) - luma(col);
+      col = mix(col, wide + (col - bil) * 0.3, uBlemish * skin * smoothstep(0.035, 0.12, dark)); // dark spots
+      float red = (col.r - max(col.g, col.b)) - (wide.r - max(wide.g, wide.b));
+      col = mix(col, vec3(col.r - red * 0.8, col.g, col.b) * 0.5 + wide * 0.5, uAcne * skin * smoothstep(0.02, 0.09, red)); // redness
+      float lift = luma(bil) - luma(col);
+      col += max(lift, 0.0) * uWrinkle * skin * 1.3;                                         // fine dark lines
+    }
+    if (skin > 0.004) {
+      col.r += uWarmth * 0.05 * skin; col.b -= uWarmth * 0.05 * skin;
+      float Yc = luma(col);
+      vec3 target = uSkinAvg * (Yc / max(luma(uSkinAvg), 0.02));
+      col = mix(col, target, uEven * skin * 0.45);
+    }
+    if (under > 0.004 && uUnder > 0.0) {
+      float d = max(0.0, luma(wide) - luma(col)) + 0.035;
+      col += d * uUnder * under * 0.9;
+      col = mix(col, vec3(luma(col)) * 0.3 + col * 0.7, uUnder * under * 0.25);
+    }
+    if (teeth > 0.004 && uTeeth > 0.0) {
+      float yel = (col.r + col.g) * 0.5 - col.b;
+      col.b += max(yel, 0.0) * 0.6 * uTeeth * teeth;
+      col = mix(col, vec3(luma(col)), 0.35 * uTeeth * teeth);
+      col *= 1.0 + 0.12 * uTeeth * teeth;
+    }
+    if (eyes > 0.004) {
+      if (uEyes > 0.0) {
+        col += (col - bS) * uEyes * eyes * 1.6;
+        col = mix(vec3(luma(col)), col, 1.0 + 0.3 * uEyes * eyes);
+        col *= 1.0 + 0.07 * uEyes * eyes;
+      }
+      float rr = col.r / max(max(col.g, col.b), 0.04);
+      if (uRedEye > 0.0 && col.r > 0.15) col.r = mix(col.r, (col.g + col.b) * 0.5, uRedEye * eyes * smoothstep(1.5, 2.2, rr));
+    }
+    if (face > 0.004 && uFaceLight != 0.0) {
+      float dir = clamp(1.0 + uLightDir * (s.x - uFaceCX) / max(uFaceW, 1e-3) * 1.6, 0.0, 2.0);
+      col *= 1.0 + uFaceLight * 0.3 * face * dir;
+    }
+    if (hair > 0.004 && uHairAmt > 0.0) {
+      col += (col - bS) * uHairAmt * hair * 1.3;
+      col = mix(vec3(luma(col)), col, 1.0 + 0.2 * uHairAmt * hair);
+    }
+    col = clamp(col, 0.0, 1.0);
   }
 
   // --- sharpening (unsharp mask) ---
@@ -300,6 +374,19 @@ void main() {
     col = hsl2rgb(h);
   }
 
+  // --- local adjustment brush ---
+  if (uLocalOn > 0.5) {
+    float lm = texture(uLocal, s).a;
+    if (lm > 0.002) {
+      col = pow(max(col, 0.0), vec3(1.0 / exp2(uLocExp * 1.2 * lm)));
+      col = mix(col, 0.5 + (col - 0.5) * (1.0 + uLocContrast * 0.8), lm);
+      col = mix(vec3(luma(col)), col, 1.0 + uLocSat * lm);
+      col.r += uLocTemp * 0.08 * lm; col.b -= uLocTemp * 0.08 * lm;
+      col += (col - bL) * uLocClarity * 0.9 * lm;
+      col = clamp(col, 0.0, 1.0);
+    }
+  }
+
   // --- curves ---
   if (uCurveOn > 0.5) {
     vec3 c = clamp(col, 0.0, 1.0) * (255.0 / 256.0) + 0.5 / 256.0;
@@ -318,6 +405,17 @@ void main() {
     col = gradeTint(col, uGradeMid, uGradeLum.y, mm);
     col = gradeTint(col, uGradeHigh, uGradeLum.z, hm);
     col = gradeTint(col, uGradeGlobal, uGradeLum.w, 1.0);
+  }
+
+  // --- colour-blend layer (colorize): colour from the layer, lightness from the photo ---
+  if (uStyleOn > 0.5 && uStyleColor > 0.5) {
+    vec3 st = texture(uStyle, s).rgb;
+    float Y = luma(col);
+    vec3 c2 = Y + (st - luma(st));
+    float lo = min(c2.r, min(c2.g, c2.b)), hi = max(c2.r, max(c2.g, c2.b));
+    if (lo < 0.0) c2 = Y + (c2 - Y) * (Y / max(Y - lo, 1e-4));
+    if (hi > 1.0) c2 = Y + (c2 - Y) * ((1.0 - Y) / max(hi - Y, 1e-4));
+    col = mix(col, c2, uStyleMix);
   }
 
   // --- vignette ---

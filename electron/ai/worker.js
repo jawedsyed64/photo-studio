@@ -31,6 +31,10 @@ async function runOp(msg, cpuOnly) {
     const data = await core.inpaint(ort, s, spec, msg.rgba, msg.mask, msg.width, msg.height);
     return { data, width: msg.width, height: msg.height };
   }
+  if (msg.op === 'detectFaces') return { faces: await core.detectFaces(ort, s, spec, msg.rgba, msg.width, msg.height, msg.minScore || 0.5) };
+  if (msg.op === 'parseFace') return { labels: await core.parseFace(ort, s, spec, msg.rgba) };
+  if (msg.op === 'restoreFace') return { data: await core.restoreFace(ort, s, spec, msg.rgba) };
+  if (msg.op === 'colorize') return { data: await core.colorize(ort, s, spec, msg.rgba, msg.width, msg.height), width: msg.width, height: msg.height };
   throw new Error('Unknown AI operation: ' + msg.op);
 }
 

@@ -219,17 +219,27 @@ function ModelsTab({ ops }: { ops: AiOps }) {
 }
 
 // ---------------- brush overlay ----------------
-export function BrushOverlay({ box, target, mode, size, soft, onStroke, onEnd, showMask }: {
+export type OverlayKind = 'object' | 'subject' | 'stroke' | 'local';
+export function BrushOverlay({ box, target, mode, size, soft, onStroke, onEnd, showMask, onStart, onAlt, sourceMark, canStroke }: {
   box: { x: number; y: number; w: number; h: number };
   target: HTMLCanvasElement | null;
   mode: BrushMode; size: number; soft: number;
   onStroke: () => void; onEnd: () => void;
-  showMask: 'object' | 'subject';
+  showMask: OverlayKind;
+  onStart?: (pt: [number, number]) => void;
+  onAlt?: (pt: [number, number]) => void;
+  sourceMark?: [number, number] | null;
+  canStroke?: () => boolean;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const last = useRef<[number, number] | null>(null);
   const cursor = useRef<[number, number] | null>(null);
   const raf = useRef(0);
+  const tint = (t: HTMLCanvasElement, color: string) => {
+    const c = document.createElement('canvas'); c.width = t.width; c.height = t.height;
+    const x = c.getContext('2d')!; x.drawImage(t, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = color; x.fillRect(0, 0, c.width, c.height);
+    return c;
+  };
 
   const redraw = () => {
     const c = ref.current; if (!c) return;
@@ -240,18 +250,21 @@ export function BrushOverlay({ box, target, mode, size, soft, onStroke, onEnd, s
     x.setTransform(dpr, 0, 0, dpr, 0, 0);
     x.clearRect(0, 0, W, H);
     if (target) {
-      if (showMask === 'object') {
-        // painted strokes tinted red
-        const t = document.createElement('canvas'); t.width = target.width; t.height = target.height;
-        const tx = t.getContext('2d')!; tx.drawImage(target, 0, 0); tx.globalCompositeOperation = 'source-in'; tx.fillStyle = 'rgba(255,40,60,0.55)'; tx.fillRect(0, 0, t.width, t.height);
-        x.drawImage(t, box.x, box.y, box.w, box.h);
-      } else {
-        // red where the background will be removed
+      if (showMask === 'object') x.drawImage(tint(target, 'rgba(255,40,60,0.55)'), box.x, box.y, box.w, box.h);
+      else if (showMask === 'stroke') x.drawImage(tint(target, 'rgba(40,220,120,0.5)'), box.x, box.y, box.w, box.h);
+      else if (showMask === 'local') x.drawImage(tint(target, 'rgba(60,140,255,0.28)'), box.x, box.y, box.w, box.h);
+      else {
         x.save(); x.beginPath(); x.rect(box.x, box.y, box.w, box.h); x.clip();
         x.fillStyle = 'rgba(255,40,60,0.35)'; x.fillRect(box.x, box.y, box.w, box.h);
         x.globalCompositeOperation = 'destination-out'; x.drawImage(target, box.x, box.y, box.w, box.h);
         x.restore();
       }
+    }
+    if (sourceMark && target) {
+      const sx = box.x + sourceMark[0] / target.width * box.w, sy = box.y + sourceMark[1] / target.height * box.h;
+      x.strokeStyle = '#fff'; x.lineWidth = 2;
+      x.beginPath(); x.moveTo(sx - 9, sy); x.lineTo(sx + 9, sy); x.moveTo(sx, sy - 9); x.lineTo(sx, sy + 9); x.stroke();
+      x.strokeStyle = '#000'; x.lineWidth = 1; x.beginPath(); x.arc(sx, sy, size / 2, 0, Math.PI * 2); x.stroke();
     }
     if (cursor.current) {
       x.strokeStyle = '#fff'; x.lineWidth = 1.5; x.beginPath(); x.arc(cursor.current[0], cursor.current[1], size / 2, 0, Math.PI * 2); x.stroke();
@@ -261,14 +274,18 @@ export function BrushOverlay({ box, target, mode, size, soft, onStroke, onEnd, s
   const schedule = () => { cancelAnimationFrame(raf.current); raf.current = requestAnimationFrame(redraw); };
   useEffect(() => { schedule(); });
 
+  const toMask = (px: number, py: number): [number, number] => {
+    const k = target ? target.width / box.w : 1;
+    return [(px - box.x) * k, (py - box.y) * k];
+  };
   const dab = (px: number, py: number) => {
     if (!target) return;
     const k = target.width / box.w;
-    const mx = (px - box.x) * k, my = (py - box.y) * k, r = Math.max(1, (size / 2) * k);
+    const [mx, my] = toMask(px, py), r = Math.max(1, (size / 2) * k);
     const x = target.getContext('2d')!;
     const g = x.createRadialGradient(mx, my, r * (1 - soft / 100) * 0.95, mx, my, r);
     g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(1, 'rgba(255,255,255,0)');
-    x.globalCompositeOperation = mode === 'mask-erase' ? 'destination-out' : 'source-over';
+    x.globalCompositeOperation = mode && mode.endsWith('erase') ? 'destination-out' : 'source-over';
     x.fillStyle = g; x.beginPath(); x.arc(mx, my, r, 0, Math.PI * 2); x.fill();
     x.globalCompositeOperation = 'source-over';
   };
@@ -278,9 +295,13 @@ export function BrushOverlay({ box, target, mode, size, soft, onStroke, onEnd, s
     <canvas ref={ref} className="brush-layer"
       onPointerDown={e => {
         if (e.button !== 0) return;
+        const p = local(e);
+        if (e.altKey && onAlt) { e.stopPropagation(); onAlt(toMask(p[0], p[1])); schedule(); return; }
         if (!target) { toast('Nothing to paint on yet'); return; }
+        if (canStroke && !canStroke()) { toast('First Alt+click on a good area to copy from.'); return; }
         e.stopPropagation(); (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-        const p = local(e); last.current = p; dab(p[0], p[1]); onStroke(); schedule();
+        onStart?.(toMask(p[0], p[1]));
+        last.current = p; dab(p[0], p[1]); onStroke(); schedule();
       }}
       onPointerMove={e => {
         const p = local(e); cursor.current = p;

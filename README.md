@@ -2,7 +2,7 @@
 
 A modern Windows desktop photo editor. It has GPU-accelerated, non-destructive editing, professional colour tools and presets, with a simple Beginner mode and a full Professional mode.
 
-> **Status:** Phases 1–3 work: core editor, professional colour editing and AI editing. Retouching, creative effects, layers and batch editing are shown in the app as **"Soon / Phase N"** and do not run yet.
+> **Status:** Phases 1–4 work: core editor, professional colour editing, AI editing, and retouching & restoration. Creative effects, text, layers and batch editing are shown in the app as **"Soon / Phase N"** and do not run yet.
 
 ## Download
 
@@ -46,10 +46,34 @@ Everything above works **offline**.
 | AI enhance (detail, noise, JPEG artefacts, same size, adjustable strength) | Offline | Real-ESRGAN x4plus |
 | HD upscale 2× / 4× / 8× (opens as a new photo) | Offline | Real-ESRGAN x2plus / x4plus |
 | Portrait & art styles (13), AI edit by description, object replacement | Online (Replicate, FLUX Kontext Pro) | needs API key |
+| Face detection / face parsing | Offline | YOLOv8-face (12 MB), BiSeNet (51 MB) |
+| Face restoration | Offline | GFPGAN 1.4 (325 MB) |
+| Colorization | Offline | DDColor (935 MB) |
 
 Offline models run in a separate process with ONNX Runtime. They use the graphics card through DirectML when it works, and the CPU otherwise. Downloads are checked against their SHA-256 and can be removed in **AI Tools → Models**. All AI results are non-destructive layers (masks, patches, style layer) that are saved inside the project and can be undone.
 
 **Online features:** create an account at replicate.com, add billing, create an API token, and paste it in **Settings → AI services**. Replicate charges per generated image. The key is encrypted with Windows' secure storage and only used by the main process.
+
+### Portrait retouching & restoration (Phase 4)
+
+**Retouching** first finds each face and maps skin, eyes, teeth and hair (face detection + face parsing, offline). Every tool then works only on its own area, so retouching stays natural:
+
+- Skin: smooth (pores kept), remove blemishes, reduce acne & redness, soften wrinkles, skin tone, even skin tone
+- Eyes & teeth: eye enhancement, red-eye correction, under-eye correction, teeth whitening
+- Face & hair: face lighting with light direction, hair refinement, background blur
+- One-click looks (Natural, Soft glow, Light touch), all adjustable afterwards
+- **Improve face details** (GFPGAN 1.4, offline) for soft, small or old faces, with adjustable strength
+- Manual tools: **spot removal** (finds a matching area automatically), **healing brush** and **clone stamp** (Alt+click to set the source), and a **local adjustment brush** (exposure, contrast, saturation, temperature, clarity)
+
+**Restoration** for old photos, in the recommended order:
+
+1. Dust & scratches: automatic detection and repair, offline, no download
+2. Repair damaged areas: paint over tears, stains or missing corners (LaMa)
+3. Faded colours & contrast: automatic per-channel restoration as editable curves; enhance old scan
+4. Improve faces (GFPGAN)
+5. Colorize black & white photos (DDColor, offline, about 1 GB). The colour is applied as a colour-blend layer with an intensity slider.
+
+The before/after view always compares against the untouched original.
 
 Every build runs an AI self-test on GitHub (`scripts/ai-selftest.cjs`). It downloads all offline models, verifies their checksums, and runs real inference. RAW camera files and EXIF metadata copying are not supported yet.
 
@@ -98,6 +122,5 @@ npm run dist       # create Windows installer + portable exe in release/
 
 ## Roadmap
 
-- **Phase 4 – Retouching & restoration:** skin smoothing, blemish removal, healing brush, clone stamp, scratch repair, colourisation.
 - **Phase 5 – Creative studio:** film/retro effects, light leaks, double exposure, text, stickers, frames.
 - **Phase 6 – Productivity:** layers & masks, blending modes, batch editing, AI editing assistant, RAW import.

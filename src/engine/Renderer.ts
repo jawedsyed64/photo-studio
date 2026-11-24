@@ -35,6 +35,9 @@ export class Renderer {
   private sharpRadius = -1;
   private vao: WebGLVertexArrayObject;
   private maskTex: WebGLTexture; private bgTex: WebGLTexture; private styleTex: WebGLTexture;
+  private faceATex: WebGLTexture; private faceBTex: WebGLTexture; private localTex: WebGLTexture;
+  hasFace = false; hasLocal = false; localLive = false; hasOrig = false;
+  private origTex: WebGLTexture;
   hasMask = false; hasBg = false; hasStyle = false; bgAspect = 1;
   harm: [number, number, number] = [1, 1, 1];
 
@@ -48,6 +51,7 @@ export class Renderer {
     this.vao = gl.createVertexArray()!;
     this.curveTex = this.makeTex(256, 1);
     this.maskTex = this.makeTex(1, 1); this.bgTex = this.makeTex(1, 1); this.styleTex = this.makeTex(1, 1);
+    this.faceATex = this.makeTex(1, 1); this.faceBTex = this.makeTex(1, 1); this.localTex = this.makeTex(1, 1); this.origTex = this.makeTex(1, 1);
   }
 
   private upload(t: WebGLTexture, img: TexImageSource, mip: boolean) {
@@ -62,6 +66,12 @@ export class Renderer {
   /** Subject mask: alpha channel = subject. */
   setMask(img: (TexImageSource & { width: number; height: number }) | null) { if (img) this.upload(this.maskTex, img, true); this.hasMask = !!img; }
   setBackground(img: (TexImageSource & { width: number; height: number }) | null) { if (img) { this.upload(this.bgTex, img, true); this.bgAspect = img.width / img.height; } this.hasBg = !!img; }
+  setFaceMasks(a: (TexImageSource & { width: number }) | null, b: (TexImageSource & { width: number }) | null) {
+    if (a && b) { this.upload(this.faceATex, a, false); this.upload(this.faceBTex, b, false); }
+    this.hasFace = !!(a && b);
+  }
+  setOriginal(img: (TexImageSource & { width: number }) | null) { if (img) this.upload(this.origTex, img, true); this.hasOrig = !!img; }
+  setLocalMask(img: (TexImageSource & { width: number }) | null) { if (img) this.upload(this.localTex, img, false); this.hasLocal = !!img; }
   setStyle(img: (TexImageSource & { width: number; height: number }) | null) { if (img) this.upload(this.styleTex, img, true); this.hasStyle = !!img; }
 
   private prog(fs: string): Prog {
@@ -212,8 +222,8 @@ export class Renderer {
   private setMain(s: EditState, outW: number, outH: number, split: number, view: [number, number, number, number] = [0, 0, 1, 1]) {
     const gl = this.gl, m = this.main;
     gl.useProgram(m.p);
-    const tex = [this.src, this.blurS!.tex, this.blurN!.tex, this.blurL!.tex, this.curveTex, this.maskTex, this.bgTex, this.styleTex];
-    const names = ['uImg', 'uBlurS', 'uBlurN', 'uBlurL', 'uCurve', 'uMask', 'uBg', 'uStyle'];
+    const tex = [this.src, this.blurS!.tex, this.blurN!.tex, this.blurL!.tex, this.curveTex, this.maskTex, this.bgTex, this.styleTex, this.faceATex, this.faceBTex, this.localTex, this.origTex];
+    const names = ['uImg', 'uBlurS', 'uBlurN', 'uBlurL', 'uCurve', 'uMask', 'uBg', 'uStyle', 'uFaceA', 'uFaceB', 'uLocal', 'uOrig'];
     tex.forEach((t, k) => { gl.activeTexture(gl.TEXTURE0 + k); gl.bindTexture(gl.TEXTURE_2D, t); this.i(m, names[k], k); });
 
     const g = s.geometry, a = s.adjust, d = s.detail, op = s.optics;
@@ -298,6 +308,28 @@ export class Renderer {
     this.f(m, 'uBgAspect', this.bgAspect);
     this.f(m, 'uStyleOn', this.hasStyle && ai.styleId ? 1 : 0);
     this.f(m, 'uStyleMix', ai.styleMix / 100);
+    this.f(m, 'uStyleColor', ai.styleBlend === 'color' ? 1 : 0);
+    this.f(m, 'uOrigOn', this.hasOrig ? 1 : 0);
+    const rt = s.retouch;
+    const rOn = this.hasFace && !!rt.maskA && !!rt.maskB;
+    this.f(m, 'uRetouchOn', rOn ? 1 : 0);
+    if (rOn) {
+      const f0 = rt.faces[0];
+      const fw = f0 ? f0.w / this.srcW : 0.2;
+      this.f(m, 'uSkinR', Math.max(0.0015, fw * 0.035));
+      this.f(m, 'uSkinLod', Math.max(0, Math.log2(Math.max(1, (f0 ? f0.w : 200) * 0.012))));
+      this.f(m, 'uFaceCX', f0 ? (f0.x + f0.w / 2) / this.srcW : 0.5);
+      this.f(m, 'uFaceW', fw);
+      this.f(m, 'uSkinAvg', rt.skinAvg[0], rt.skinAvg[1], rt.skinAvg[2]);
+      for (const [u, v] of [['uSmooth', rt.smooth], ['uBlemish', rt.blemish], ['uAcne', rt.acne], ['uWrinkle', rt.wrinkle], ['uWarmth', rt.warmth], ['uEven', rt.even],
+        ['uUnder', rt.underEye], ['uTeeth', rt.teeth], ['uEyes', rt.eyes], ['uRedEye', rt.redEye], ['uFaceLight', rt.faceLight], ['uLightDir', rt.lightDir], ['uHairAmt', rt.hair]] as [string, number][])
+        this.f(m, u, v / 100);
+    }
+    const lc = s.local;
+    const lOn = this.hasLocal && (!!lc.maskId || this.localLive);
+    this.f(m, 'uLocalOn', lOn ? 1 : 0);
+    this.f(m, 'uLocExp', lc.exposure / 100); this.f(m, 'uLocContrast', lc.contrast / 100); this.f(m, 'uLocSat', lc.saturation / 100);
+    this.f(m, 'uLocTemp', lc.temperature / 100); this.f(m, 'uLocClarity', lc.clarity / 100);
     this.f(m, 'uView', view[0], view[1], view[2], view[3]);
   }
 

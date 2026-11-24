@@ -51,7 +51,46 @@ const MODELS = {
     kind: 'inpaint', input: 512,
     license: 'Apache-2.0 (LaMa)',
   },
+  'face-detect': {
+    name: 'Face detection (YOLOv8-face)',
+    file: 'yoloface_8n.onnx',
+    url: 'https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/yoloface_8n.onnx',
+    sha256: '821cdbb1e65fbbabdde7dd0933f754797a343e56fd962729c61ffcefcd135929',
+    size: 12659761,
+    kind: 'face-detect', input: 640,
+    license: 'GPL-3.0 (YOLOv8-face)',
+  },
+  'face-parse': {
+    name: 'Face parsing – skin, eyes, teeth, hair (BiSeNet)',
+    file: 'face_parsing_resnet18.onnx',
+    url: 'https://github.com/yakhyo/face-parsing/releases/download/v0.0.1/resnet18.onnx',
+    sha256: '0d9bd318e46987c3bdbfacae9e2c0f461cae1c6ac6ea6d43bbe541a91727e33f',
+    size: 53205364,
+    kind: 'face-parse', input: 512, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225],
+    license: 'MIT (face-parsing / BiSeNet)',
+  },
+  'face-restore': {
+    name: 'Face restoration (GFPGAN 1.4)',
+    file: 'gfpgan_1.4.onnx',
+    url: 'https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/gfpgan_1.4.onnx',
+    sha256: 'accc4757b26bdb89b32b4d3500d4f79c9dff97c1dd7c7104bf9dcb95e3311385',
+    size: 340299087,
+    kind: 'face-restore', input: 512,
+    license: 'Apache-2.0 (GFPGAN)',
+  },
+  'colorize': {
+    name: 'Colorize black-and-white photos (DDColor)',
+    file: 'ddcolor.onnx',
+    url: 'https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/ddcolor.onnx',
+    sha256: 'dd6156f056d0690891ef35f9ee87176d4d976ab19bbd36e57d18e841e064d797',
+    size: 980103562,
+    kind: 'colorize', input: 512,
+    license: 'Apache-2.0 (DDColor)',
+  },
 };
+
+// FFHQ 512 alignment template (left eye, right eye, nose, left mouth, right mouth)
+const FFHQ_512 = [[0.37691676, 0.46864664], [0.62285697, 0.46912813], [0.50123859, 0.61331904], [0.39308822, 0.72541100], [0.61150205, 0.72490465]].map(([x, y]) => [x * 512, y * 512]);
 
 // ---------------- resizing helpers ----------------
 /** Bilinear resize of interleaved `ch`-channel data (Uint8 or Float32). Pre-halves for big reductions. */
@@ -199,4 +238,115 @@ async function inpaint(ort, session, spec, rgba, mask, w, h) {
   return out;
 }
 
-module.exports = { MODELS, resize, toCHW, createSession, removeBackground, upscale, inpaint };
+// ---------------- faces ----------------
+function iou(a, b) {
+  const x0 = Math.max(a.x, b.x), y0 = Math.max(a.y, b.y), x1 = Math.min(a.x + a.w, b.x + b.w), y1 = Math.min(a.y + a.h, b.y + b.h);
+  const i = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  return i / (a.w * a.h + b.w * b.h - i + 1e-6);
+}
+
+/** Detect faces. Returns [{x,y,w,h,score,kps:[[x,y]×5]}] in image pixels, best first. */
+async function detectFaces(ort, session, spec, rgba, w, h, minScore = 0.5) {
+  const S = spec.input, k = S / Math.max(w, h);
+  const rw = Math.max(1, Math.round(w * k)), rh = Math.max(1, Math.round(h * k));
+  const small = resize(rgba, w, h, 4, rw, rh);
+  const n = S * S, inp = new Float32Array(3 * n); // letterbox top-left, zero padding
+  for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) {
+    const si = (y * rw + x) * 4, di = y * S + x;
+    inp[di] = small[si] / 255; inp[n + di] = small[si + 1] / 255; inp[2 * n + di] = small[si + 2] / 255;
+  }
+  const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', inp, [1, 3, S, S]) });
+  const o = out[session.outputNames[0]], d = o.data, N = o.dims[2];
+  const cands = [];
+  for (let i = 0; i < N; i++) {
+    const sc = d[4 * N + i];
+    if (sc < minScore) continue;
+    const cx = d[i] / k, cy = d[N + i] / k, bw = d[2 * N + i] / k, bh = d[3 * N + i] / k;
+    const kps = [];
+    for (let j = 0; j < 5; j++) kps.push([d[(5 + j * 3) * N + i] / k, d[(6 + j * 3) * N + i] / k]);
+    cands.push({ x: cx - bw / 2, y: cy - bh / 2, w: bw, h: bh, score: sc, kps });
+  }
+  cands.sort((a, b) => b.score - a.score);
+  const keep = [];
+  for (const c of cands) if (!keep.some(k2 => iou(k2, c) > 0.4)) keep.push(c);
+  return keep;
+}
+
+/** Face parsing on an aligned 512×512 RGBA face crop → Uint8 labels (CelebAMask-HQ classes). */
+async function parseFace(ort, session, spec, rgba) {
+  const S = spec.input;
+  const inp = toCHW(rgba, S, S, spec.mean, spec.std);
+  const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', inp, [1, 3, S, S]) });
+  const o = out[session.outputNames[0]], d = o.data, C = o.dims[1], n = S * S;
+  const lab = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    let best = 0, bv = d[i];
+    for (let c = 1; c < C; c++) { const v = d[c * n + i]; if (v > bv) { bv = v; best = c; } }
+    lab[i] = best;
+  }
+  return lab;
+}
+
+/** GFPGAN on an aligned 512×512 RGBA crop → RGBA 512×512. */
+async function restoreFace(ort, session, spec, rgba) {
+  const S = spec.input, n = S * S;
+  const inp = toCHW(rgba, S, S, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
+  const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', inp, [1, 3, S, S]) });
+  const d = out[session.outputNames[0]].data;
+  const res = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) {
+    res[i * 4] = (Math.max(-1, Math.min(1, d[i])) + 1) * 127.5;
+    res[i * 4 + 1] = (Math.max(-1, Math.min(1, d[n + i])) + 1) * 127.5;
+    res[i * 4 + 2] = (Math.max(-1, Math.min(1, d[2 * n + i])) + 1) * 127.5;
+    res[i * 4 + 3] = 255;
+  }
+  return res;
+}
+
+// ---------------- colour space (matches OpenCV float sRGB <-> Lab, D65) ----------------
+const lin = v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+const gam = v => v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+const fLab = t => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+const fInv = t => { const t3 = t * t * t; return t3 > 0.008856 ? t3 : (t - 16 / 116) / 7.787; };
+function rgbToLab(r, g, b) {
+  r = lin(r); g = lin(g); b = lin(b);
+  const X = (0.412453 * r + 0.357580 * g + 0.180423 * b) / 0.950456;
+  const Y = 0.212671 * r + 0.715160 * g + 0.072169 * b;
+  const Z = (0.019334 * r + 0.119193 * g + 0.950227 * b) / 1.088754;
+  const fy = fLab(Y);
+  return [Y > 0.008856 ? 116 * fy - 16 : 903.3 * Y, 500 * (fLab(X) - fy), 200 * (fy - fLab(Z))];
+}
+function labToRgb(L, a, b) {
+  const fy = (L + 16) / 116, fx = fy + a / 500, fz = fy - b / 200;
+  const X = fInv(fx) * 0.950456, Y = L > 7.9996 ? fy * fy * fy : L / 903.3, Z = fInv(fz) * 1.088754;
+  const r = 3.240479 * X - 1.537150 * Y - 0.498535 * Z;
+  const g = -0.969256 * X + 1.875992 * Y + 0.041556 * Z;
+  const bb = 0.055648 * X - 0.204043 * Y + 1.057311 * Z;
+  return [gam(Math.max(0, r)), gam(Math.max(0, g)), gam(Math.max(0, bb))];
+}
+
+/** Colorize: returns RGBA of the same size with original lightness and predicted colour. */
+async function colorize(ort, session, spec, rgba, w, h) {
+  const S = spec.input, n = S * S;
+  const small = resize(rgba, w, h, 4, S, S);
+  const inp = new Float32Array(3 * n);
+  for (let i = 0; i < n; i++) {
+    const L = rgbToLab(small[i * 4] / 255, small[i * 4 + 1] / 255, small[i * 4 + 2] / 255)[0];
+    const g = labToRgb(L, 0, 0)[0];
+    inp[i] = g; inp[n + i] = g; inp[2 * n + i] = g;
+  }
+  const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', inp, [1, 3, S, S]) });
+  const d = out[session.outputNames[0]].data;
+  const ab = new Float32Array(n * 2);
+  for (let i = 0; i < n; i++) { ab[i * 2] = d[i]; ab[i * 2 + 1] = d[n + i]; }
+  const AB = resize(ab, S, S, 2, w, h);
+  const res = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const L = rgbToLab(rgba[i * 4] / 255, rgba[i * 4 + 1] / 255, rgba[i * 4 + 2] / 255)[0];
+    const [r, g, b] = labToRgb(L, AB[i * 2], AB[i * 2 + 1]);
+    res[i * 4] = r * 255; res[i * 4 + 1] = g * 255; res[i * 4 + 2] = b * 255; res[i * 4 + 3] = rgba[i * 4 + 3];
+  }
+  return res;
+}
+
+module.exports = { MODELS, FFHQ_512, resize, toCHW, createSession, removeBackground, upscale, inpaint, detectFaces, parseFace, restoreFace, colorize, rgbToLab, labToRgb };

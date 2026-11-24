@@ -7,6 +7,33 @@ const path = require('path');
 const crypto = require('crypto');
 const ort = require('onnxruntime-node');
 const core = require('../electron/ai/core');
+const zlib = require('zlib');
+const ASTRO = new Uint8Array(zlib.gunzipSync(fs.readFileSync(path.join(__dirname, '..', 'tests', 'fixtures', 'astronaut-512.rgba.gz'))));
+
+function similarity(src, dst) {
+  const n = src.length; let sx = 0, sy = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) { sx += src[i][0]; sy += src[i][1]; dx += dst[i][0]; dy += dst[i][1]; }
+  sx /= n; sy /= n; dx /= n; dy /= n;
+  let a1 = 0, b1 = 0, den = 0;
+  for (let i = 0; i < n; i++) { const px = src[i][0] - sx, py = src[i][1] - sy, qx = dst[i][0] - dx, qy = dst[i][1] - dy; a1 += px * qx + py * qy; b1 += px * qy - py * qx; den += px * px + py * py; }
+  const a = a1 / den, b = b1 / den;
+  return [a, b, dx - (a * sx - b * sy), dy - (b * sx + a * sy)];
+}
+/** Warp src (W×H RGBA) into a 512×512 crop with a similarity transform (src -> template). */
+function warp512(src, W, H, M) {
+  const [a, b, tx, ty] = M, det = a * a + b * b, out = new Uint8Array(512 * 512 * 4);
+  for (let y = 0; y < 512; y++) for (let x = 0; x < 512; x++) {
+    const u = x - tx, v = y - ty;
+    const sx = (a * u + b * v) / det, sy = (-b * u + a * v) / det;
+    const x0 = Math.max(0, Math.min(W - 2, Math.floor(sx))), y0 = Math.max(0, Math.min(H - 2, Math.floor(sy)));
+    const fx = Math.max(0, Math.min(1, sx - x0)), fy = Math.max(0, Math.min(1, sy - y0));
+    for (let c = 0; c < 4; c++) {
+      const p = (yy, xx) => src[(yy * W + xx) * 4 + c];
+      out[(y * 512 + x) * 4 + c] = (p(y0, x0) * (1 - fx) + p(y0, x0 + 1) * fx) * (1 - fy) + (p(y0 + 1, x0) * (1 - fx) + p(y0 + 1, x0 + 1) * fx) * fy;
+    }
+  }
+  return out;
+}
 
 const dir = path.resolve(process.argv[2] || 'ai-models');
 fs.mkdirSync(dir, { recursive: true });
@@ -85,6 +112,42 @@ function synthetic(W, H) {
       ok(!(out[i] > 200 && out[i + 1] > 200 && out[i + 2] < 60), `inpaint: object filled (pixel now ${out[i]},${out[i + 1]},${out[i + 2]}) in ${Date.now() - t} ms`);
       const j = (30 * w + 30) * 4;
       ok(Math.abs(out[j] - im[j]) < 40, `inpaint: surroundings kept (${out[j]} vs ${im[j]})`);
+    }
+
+    // faces (real photo: NASA astronaut portrait, public domain)
+    {
+      let t = Date.now();
+      const faces = await core.detectFaces(ort, await sess('face-detect'), core.MODELS['face-detect'], ASTRO, 512, 512);
+      ok(faces.length >= 1 && faces[0].score > 0.6, `face-detect: ${faces.length} face(s), score ${faces[0] ? faces[0].score.toFixed(2) : '-'} in ${Date.now() - t} ms`);
+      const f = faces[0];
+      ok(f && Math.abs(f.kps[0][0] - 202) < 12 && Math.abs(f.kps[0][1] - 101) < 12 && Math.abs(f.kps[1][0] - 247) < 12, `face-detect: eye landmarks ${f ? f.kps.slice(0, 2).map(p => p.map(Math.round).join(',')).join(' / ') : '-'}`);
+      const crop = warp512(ASTRO, 512, 512, similarity(f.kps, core.FFHQ_512));
+      t = Date.now();
+      const lab = await core.parseFace(ort, await sess('face-parse'), core.MODELS['face-parse'], crop);
+      const at = (x, y) => lab[y * 512 + x];
+      ok(at(160, 310) === 1 && [4, 5].includes(at(193, 240)) && at(256, 300) === 10 && at(256, 40) === 17,
+        `face-parse: skin/eye/nose/hair = ${at(160, 310)}/${at(193, 240)}/${at(256, 300)}/${at(256, 40)} (expect 1/4-5/10/17) in ${Date.now() - t} ms`);
+      t = Date.now();
+      const rest = await core.restoreFace(ort, await sess('face-restore'), core.MODELS['face-restore'], crop);
+      let d = 0; for (let i = 0; i < rest.length; i += 4 * 13) d += Math.abs(rest[i] - crop[i]);
+      d /= rest.length / (4 * 13);
+      ok(d > 1 && d < 40, `face-restore: changed but faithful (mean diff ${d.toFixed(1)}) in ${Date.now() - t} ms`);
+    }
+
+    // colorization
+    {
+      const g = new Uint8Array(ASTRO);
+      for (let i = 0; i < g.length; i += 4) { const y = Math.round(0.299 * g[i] + 0.587 * g[i + 1] + 0.114 * g[i + 2]); g[i] = g[i + 1] = g[i + 2] = y; }
+      const t = Date.now();
+      const col = await core.colorize(ort, await sess('colorize'), core.MODELS.colorize, g, 512, 512);
+      let chroma = 0, dl = 0;
+      for (let i = 0; i < col.length; i += 4 * 11) {
+        chroma += Math.max(col[i], col[i + 1], col[i + 2]) - Math.min(col[i], col[i + 1], col[i + 2]);
+        dl += Math.abs(core.rgbToLab(col[i] / 255, col[i + 1] / 255, col[i + 2] / 255)[0] - core.rgbToLab(g[i] / 255, g[i] / 255, g[i] / 255)[0]);
+      }
+      const n = col.length / (4 * 11);
+      ok(chroma / n > 15, `colorize: colour added (mean chroma ${(chroma / n).toFixed(1)})`);
+      ok(dl / n < 3, `colorize: lightness preserved (mean ΔL ${(dl / n).toFixed(2)}) in ${Date.now() - t} ms`);
     }
   }
   console.log(failed ? `\n${failed} check(s) FAILED` : '\nAll AI checks passed');

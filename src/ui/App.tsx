@@ -27,8 +27,8 @@ const TILES: { k: string; label: string; desc: string; icon: string; phase?: num
   { k: 'color', label: 'Color Correction', desc: 'Curves, HSL, colour grading', icon: 'color' },
   { k: 'presets', label: 'Presets & Filters', desc: '21 professional looks', icon: 'filters' },
   { k: 'ai', label: 'AI Photo Editing', desc: 'Background, objects, upscale, styles', icon: 'ai' },
-  { k: 'portrait', label: 'Portrait Retouching', desc: 'Skin, eyes, healing brush', icon: 'portrait', phase: 4 },
-  { k: 'restore', label: 'Photo Restoration', desc: 'Repair & colourise old photos', icon: 'restore', phase: 4 },
+  { k: 'portrait', label: 'Portrait Retouching', desc: 'Skin, eyes, teeth, healing brush', icon: 'portrait' },
+  { k: 'restore', label: 'Photo Restoration', desc: 'Repair & colourise old photos', icon: 'restore' },
   { k: 'effects', label: 'Creative Effects', desc: 'Film, light leaks, text', icon: 'effects', phase: 5 },
   { k: 'batch', label: 'Batch Editing', desc: 'Edit hundreds at once', icon: 'batch', phase: 6 },
   { k: 'export', label: 'Export and Sharing', desc: 'JPEG, PNG, WebP, TIFF', icon: 'share' },
@@ -149,6 +149,8 @@ export function App() {
       case 'color': setSettings({ ...settings, mode: 'pro' }); return pick('color');
       case 'presets': return pick('filters');
       case 'ai': return pick('ai');
+      case 'portrait': return pick('retouch');
+      case 'restore': return pick('restore');
       case 'project': return platform.openProject().then(p => p && openProjectText(p.text, p.path));
       case 'import': return importMany();
       case 'export': return toast('Open a photo first, then use the Export button in the editor (Ctrl+E).');

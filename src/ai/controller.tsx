@@ -7,8 +7,9 @@ import { EditState, clone, hexToRgbaSafe } from './util';
 import { AssetStore, canvas, ctx2d, drawTo, scaleToFit, canvasToBytes, weightedMean } from './assets';
 import { ai, aiError, ModelInfo } from './client';
 import { Modal, toast, formatBytes } from '../ui/common';
+import { FFHQ_512, similarity, invert, apply, warpCrop, rgbaOf as rgbaOfC, pasteMask512, labelMasks, skinMean, healPatch, removeDust as dustWorker } from './retouchOps';
 
-export type BrushMode = null | 'object' | 'mask-add' | 'mask-erase';
+export type BrushMode = null | 'object' | 'mask-add' | 'mask-erase' | 'spot' | 'heal' | 'clone' | 'local-add' | 'local-erase';
 
 export interface AiOps {
   removeBackground(model: 'bg-fast' | 'bg-best'): Promise<void>;
@@ -27,6 +28,13 @@ export interface AiOps {
   hasObjectMask: boolean;
   hasKey: boolean;
   refreshKey(): void;
+  analyzeFaces(): Promise<boolean>;
+  restoreFaces(strength: number): Promise<void>;
+  colorize(): Promise<void>;
+  autoRestoreColors(): void;
+  removeDust(size: number, sensitivity: number): Promise<void>;
+  clearLocal(): void;
+  healSource: boolean;
 }
 
 interface Opts {
@@ -58,6 +66,10 @@ export function useAiController(o: Opts) {
   const [hasObjectMask, setHasObjectMask] = useState(false);
   const [maskVersion, setMaskVersion] = useState(0);
   const W = o.loaded.width, H = o.loaded.height;
+  const strokeMask = useRef<HTMLCanvasElement | null>(null);
+  const localMask = useRef<HTMLCanvasElement | null>(null);
+  const healSrc = useRef<{ src: [number, number]; offset: [number, number] | null } | null>(null);
+  const [healSource, setHealSource] = useState(false);
 
   const refreshModels = useCallback(() => { ai.models().then(setModels).catch(() => {}); }, []);
   const refreshKey = useCallback(() => { ai.hasKey().then(setHasKey).catch(() => {}); }, []);
@@ -93,8 +105,8 @@ export function useAiController(o: Opts) {
         for (const p of a.patches) x.drawImage(await o.assets.bitmap(p.id), p.x, p.y, p.w, p.h);
         if (composeKey.current !== key) return;
         working.current = c;
-        if (a.baseId || a.patches.length || r.srcW !== W) r.setImage(c);
-        else r.setImage(o.loaded.image as any);
+        if (a.baseId || a.patches.length || r.srcW !== W) { r.setImage(c); if (!r.hasOrig) r.setOriginal(o.loaded.image as any); }
+        else { r.setImage(o.loaded.image as any); r.setOriginal(null); }
         o.onTexturesChanged();
       } catch (e) { toast('Could not rebuild the photo: ' + aiError(e), 'error'); }
     })();
@@ -128,6 +140,19 @@ export function useAiController(o: Opts) {
     if (!id) { r.setStyle(null); o.onTexturesChanged(); return; }
     o.assets.bitmap(id).then(b => { r.setStyle(b); o.onTexturesChanged(); }).catch(e => toast(aiError(e), 'error'));
   }, [o.ready, o.state.ai.styleId]);
+  useEffect(() => {
+    const r = o.rendererRef.current; if (!o.ready || !r) return;
+    const { maskA, maskB } = o.state.retouch;
+    if (!maskA || !maskB) { r.setFaceMasks(null, null); o.onTexturesChanged(); return; }
+    Promise.all([o.assets.bitmap(maskA), o.assets.bitmap(maskB)]).then(([a, b]) => { r.setFaceMasks(a, b); o.onTexturesChanged(); }).catch(e => toast(aiError(e), 'error'));
+  }, [o.ready, o.state.retouch.maskA, o.state.retouch.maskB]);
+  useEffect(() => {
+    const r = o.rendererRef.current; if (!o.ready || !r) return;
+    const id = o.state.local.maskId;
+    if (!id) { r.setLocalMask(null); localMask.current = null; o.onTexturesChanged(); return; }
+    o.assets.bitmap(id).then(b => { const c = drawTo(b, b.width, b.height); localMask.current = c; r.setLocalMask(c); o.onTexturesChanged(); }).catch(e => toast(aiError(e), 'error'));
+  }, [o.ready, o.state.local.maskId]);
+
   // harmonize multiplier: subject mean / background mean
   useEffect(() => {
     const r = o.rendererRef.current; if (!o.ready || !r || !subjMask.current) return;
@@ -302,7 +327,7 @@ export function useAiController(o: Opts) {
       setBusy({ title: label + '…', progress: null, provider: 'Online (Replicate)', note: 'Uploading…' });
       const bytes = await ai.online('edit', { prompt, image: await toJpeg(getWorking()) });
       const id = await o.assets.put(new Uint8Array(bytes));
-      const s = clone(o.getState()); s.ai.styleId = id; s.ai.styleMix = 100;
+      const s = clone(o.getState()); s.ai.styleId = id; s.ai.styleMix = 100; s.ai.styleBlend = 'normal';
       o.setStateLabeled(label, s);
       toast('Done. Use the intensity slider to blend with your photo.', 'ok');
     });
@@ -331,24 +356,188 @@ export function useAiController(o: Opts) {
     o.setStateLabeled('Custom background', s);
   };
 
+  // ---------- faces ----------
+  const findFaces = async () => {
+    const [w, h] = scaleToFit(W, H, 1600);
+    const src = drawTo(getWorking(), w, h);
+    const res = await ai.run({ op: 'detectFaces', model: 'face-detect', rgba: rgbaOf(src), width: w, height: h, minScore: 0.45 });
+    const k = W / w;
+    return (res.faces as any[]).slice(0, 8).map(f => ({ x: f.x * k, y: f.y * k, w: f.w * k, h: f.h * k, kps: f.kps.map((p: number[]) => [p[0] * k, p[1] * k]) }));
+  };
+  const analyzeFaces = async () => {
+    if (!(await ensureModel('face-detect')) || !(await ensureModel('face-parse'))) return false;
+    const done = await run('Analysing faces…', async () => {
+      const faces = await findFaces();
+      if (!faces.length) { toast('No faces were found in this photo.', 'error'); return false; }
+      const [mw, mh] = scaleToFit(W, H, 2048), ks = mw / W;
+      const A = canvas(mw, mh), B = canvas(mw, mh), ax = ctx2d(A), bx = ctx2d(B);
+      for (const c of [ax, bx]) { c.fillStyle = '#000'; c.fillRect(0, 0, mw, mh); c.globalCompositeOperation = 'lighten'; c.filter = 'blur(1px)'; }
+      let skin: [number, number, number] = [0.8, 0.6, 0.5];
+      for (let i = 0; i < faces.length; i++) {
+        setBusy(b => b ? { ...b, progress: i / faces.length } : b);
+        const M = similarity(faces[i].kps, FFHQ_512);
+        const crop = warpCrop(getWorking(), M);
+        const res = await ai.run({ op: 'parseFace', model: 'face-parse', rgba: rgbaOfC(crop) });
+        const lab: Uint8Array = res.labels;
+        if (i === 0) skin = skinMean(crop, lab);
+        const { A: ta, B: tb } = labelMasks(lab);
+        const inv = invert(M);
+        for (const [c, t] of [[ax, ta], [bx, tb]] as [CanvasRenderingContext2D, HTMLCanvasElement][]) {
+          c.setTransform(inv[0] * ks, inv[1] * ks, inv[2] * ks, inv[3] * ks, inv[4] * ks, inv[5] * ks);
+          c.drawImage(t, 0, 0);
+          c.setTransform(1, 0, 0, 1, 0, 0);
+        }
+      }
+      const [maskA, maskB] = await Promise.all([o.assets.putCanvas(A), o.assets.putCanvas(B)]);
+      const s = clone(o.getState());
+      s.retouch = { ...s.retouch, maskA, maskB, faces, skinAvg: skin };
+      o.setStateLabeled('Analyse faces', s);
+      toast(faces.length === 1 ? 'Face found. Use the sliders to retouch.' : `${faces.length} faces found. Use the sliders to retouch.`, 'ok');
+      return true;
+    });
+    return !!done;
+  };
+  const restoreFaces = async (strength: number) => {
+    if (!(await ensureModel('face-detect')) || !(await ensureModel('face-restore'))) return;
+    await run('Improving faces…', async () => {
+      const faces = await findFaces();
+      if (!faces.length) { toast('No faces were found in this photo.', 'error'); return; }
+      const pm = pasteMask512();
+      const s = clone(o.getState());
+      for (let i = 0; i < faces.length; i++) {
+        setBusy(b => b ? { ...b, progress: i / faces.length, note: `Face ${i + 1} of ${faces.length}` } : b);
+        const M = similarity(faces[i].kps, FFHQ_512), inv = invert(M);
+        const crop = warpCrop(getWorking(), M);
+        const res = await ai.run({ op: 'restoreFace', model: 'face-restore', rgba: rgbaOfC(crop) });
+        const rc = canvas(512, 512); ctx2d(rc).putImageData(new ImageData(new Uint8ClampedArray(res.data), 512, 512), 0, 0);
+        ctx2d(rc).globalCompositeOperation = 'destination-in'; ctx2d(rc).drawImage(pm, 0, 0);
+        const pts = [[0, 0], [512, 0], [0, 512], [512, 512]].map(([x, y]) => apply(inv, x, y));
+        const x0 = Math.max(0, Math.floor(Math.min(...pts.map(p => p[0])))), y0 = Math.max(0, Math.floor(Math.min(...pts.map(p => p[1]))));
+        const x1 = Math.min(W, Math.ceil(Math.max(...pts.map(p => p[0])))), y1 = Math.min(H, Math.ceil(Math.max(...pts.map(p => p[1]))));
+        if (x1 - x0 < 4 || y1 - y0 < 4) continue;
+        const patch = canvas(x1 - x0, y1 - y0), px = ctx2d(patch);
+        px.globalAlpha = strength / 100;
+        px.setTransform(inv[0], inv[1], inv[2], inv[3], inv[4] - x0, inv[5] - y0);
+        px.drawImage(rc, 0, 0);
+        const id = await o.assets.putCanvas(patch);
+        s.ai.patches = [...s.ai.patches, { id, x: x0, y: y0, w: x1 - x0, h: y1 - y0 }];
+      }
+      o.setStateLabeled('Improve faces', s);
+      toast('Faces improved. Use Original or Ctrl+Z to compare.', 'ok');
+    });
+  };
+
+  // ---------- restoration ----------
+  const colorize = async () => {
+    if (!(await ensureModel('colorize'))) return;
+    await run('Colorizing…', async () => {
+      const [w, h] = scaleToFit(W, H, 3000);
+      const src = drawTo(getWorking(), w, h);
+      const res = await ai.run({ op: 'colorize', model: 'colorize', rgba: rgbaOf(src), width: w, height: h });
+      const c = canvas(w, h); ctx2d(c).putImageData(new ImageData(new Uint8ClampedArray(res.data), w, h), 0, 0);
+      const id = await o.assets.putCanvas(c, 'image/jpeg', 0.95);
+      const s = clone(o.getState()); s.ai.styleId = id; s.ai.styleMix = 100; s.ai.styleBlend = 'color';
+      o.setStateLabeled('Colorize', s);
+      toast('Colorized. Use the intensity slider to make the colours softer.', 'ok');
+    });
+  };
+  const autoRestoreColors = () => {
+    const r = o.rendererRef.current; if (!r) return;
+    const base = clone(o.getState());
+    const d = clone(base);
+    d.adjust = { ...d.adjust, exposure: 0, contrast: 0, saturation: 0, vibrance: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temperature: 0, tint: 0, dehaze: 0 };
+    d.curves = { master: [[0, 0], [1, 1]], r: [[0, 0], [1, 1]], g: [[0, 0], [1, 1]], b: [[0, 0], [1, 1]] };
+    const hst = r.histogram(d);
+    const pct = (a: Uint32Array, p: number) => { let t = 0; for (let i = 0; i < 256; i++) t += a[i]; let acc = 0; for (let i = 0; i < 256; i++) { acc += a[i]; if (acc >= t * p) return i / 255; } return 1; };
+    const ch = (a: Uint32Array): [number, number][] => { const lo = Math.min(0.4, pct(a, 0.004)), hi = Math.max(0.6, pct(a, 0.996)); return [[lo, 0], [hi, 1]]; };
+    base.curves = { master: [[0, 0], [0.25, 0.22], [0.75, 0.78], [1, 1]], r: ch(hst.r), g: ch(hst.g), b: ch(hst.b) };
+    base.adjust.vibrance = Math.max(base.adjust.vibrance, 12);
+    base.adjust.dehaze = Math.max(base.adjust.dehaze, 8);
+    base.adjust.clarity = Math.max(base.adjust.clarity, 8);
+    o.setStateLabeled('Auto restore colours', base);
+    toast('Faded colours and contrast restored. Fine-tune in Color → Curves.', 'ok');
+  };
+  const removeDust = async (size: number, sensitivity: number) => {
+    await run('Removing dust & scratches…', async () => {
+      setBusy({ title: 'Removing dust & scratches…', progress: 0, provider: 'this computer' });
+      const wk = getWorking();
+      const img = ctx2d(wk).getImageData(0, 0, W, H);
+      const res = await dustWorker(img, size * Math.max(1, W / 2000), sensitivity, p => setBusy(b => b ? { ...b, progress: p } : b));
+      const c = canvas(W, H); ctx2d(c).putImageData(new ImageData(res.data, W, H), 0, 0);
+      const baseId = await o.assets.putCanvas(c);
+      const s = clone(o.getState()); s.ai.baseId = baseId; s.ai.patches = [];
+      o.setStateLabeled('Remove dust & scratches', s);
+      toast(res.count ? `Cleaned ${res.count.toLocaleString()} damaged pixels. Zoom in to check, or press Ctrl+Z.` : 'No dust or scratches found at this sensitivity.', res.count ? 'ok' : 'info', 5000);
+    });
+  };
+  const clearLocal = () => { const s = clone(o.getState()); s.local.maskId = null; o.setStateLabeled('Clear local adjustment', s); };
+
   const deleteModel = async (id: string) => { await ai.deleteModel(id); refreshModels(); };
 
   const ops: AiOps = {
     removeBackground, ensureMask, removeObject, clearObjectMask, enhance, upscale, aiEdit, generateBackground, uploadBackground,
     models, refreshModels, download, deleteModel, hasObjectMask, hasKey, refreshKey,
+    analyzeFaces, restoreFaces, colorize, autoRestoreColors, removeDust, clearLocal, healSource,
   };
 
   // ---------- brush painting ----------
-  const paintTarget = () => brush.mode === 'object' ? getObjMask() : brush.mode ? (subjMask.current || null) : null;
-  const strokeEnd = async () => {
+  const getStrokeMask = () => { if (!strokeMask.current) { const [w, h] = scaleToFit(W, H, 2048); strokeMask.current = canvas(w, h); } return strokeMask.current; };
+  const getLocalMask = () => { if (!localMask.current) { const [w, h] = scaleToFit(W, H, 2048); localMask.current = canvas(w, h); } return localMask.current; };
+  const paintTarget = () => {
+    const m = brush.mode;
+    if (m === 'object') return getObjMask();
+    if (m === 'spot' || m === 'heal' || m === 'clone') return getStrokeMask();
+    if (m === 'local-add' || m === 'local-erase') return getLocalMask();
+    return m ? (subjMask.current || null) : null;
+  };
+  const strokeStart = (pt: [number, number]) => {
+    const m = brush.mode;
+    if (m === 'spot' || m === 'heal' || m === 'clone') { const c = getStrokeMask(); ctx2d(c).clearRect(0, 0, c.width, c.height); }
+    if ((m === 'heal' || m === 'clone') && healSrc.current && !healSrc.current.offset) {
+      const k = W / getStrokeMask().width;
+      healSrc.current.offset = [Math.round(healSrc.current.src[0] - pt[0] * k), Math.round(healSrc.current.src[1] - pt[1] * k)];
+    }
+  };
+  const setSource = (pt: [number, number]) => {
+    const k = W / getStrokeMask().width;
+    healSrc.current = { src: [pt[0] * k, pt[1] * k], offset: null };
+    setHealSource(true);
+    toast('Source set. Now paint over the area to repair.');
+  };
+  const sourceMark = (): [number, number] | null => { if (!healSrc.current) return null; const k = getStrokeMask().width / W; return [healSrc.current.src[0] * k, healSrc.current.src[1] * k]; };
+  const canStroke = () => !((brush.mode === 'heal' || brush.mode === 'clone') && !healSrc.current);
+  const strokeEnd = async (screenToWork = 1) => {
     if (brush.mode === 'object') { setHasObjectMask(true); return; }
+    if (brush.mode === 'spot' || brush.mode === 'heal' || brush.mode === 'clone') {
+      const mode = brush.mode;
+      const brushPx = (brush.size / 2) * screenToWork;
+      const res = healPatch(getWorking(), getStrokeMask(), mode, healSrc.current?.offset || null, Math.max(4, brushPx));
+      ctx2d(getStrokeMask()).clearRect(0, 0, getStrokeMask().width, getStrokeMask().height);
+      if (!res) return;
+      const id = await o.assets.putCanvas(res.patch);
+      const s = clone(o.getState());
+      s.ai.patches = [...s.ai.patches, { id, x: res.region.x, y: res.region.y, w: res.region.w, h: res.region.h }];
+      o.setStateLabeled({ spot: 'Spot removal', heal: 'Healing brush', clone: 'Clone stamp' }[mode], s);
+      return;
+    }
+    if ((brush.mode === 'local-add' || brush.mode === 'local-erase') && localMask.current) {
+      if (o.rendererRef.current) o.rendererRef.current.localLive = false;
+      const id = await o.assets.putCanvas(localMask.current);
+      const s = clone(o.getState()); s.local.maskId = id;
+      o.setStateLabeled('Local adjustment brush', s);
+      return;
+    }
     if ((brush.mode === 'mask-add' || brush.mode === 'mask-erase') && subjMask.current) {
       const id = await o.assets.putCanvas(subjMask.current);
       const s = clone(o.getState()); s.ai.maskId = id;
       o.setStateLabeled(brush.mode === 'mask-add' ? 'Refine mask (add)' : 'Refine mask (erase)', s);
     }
   };
-  const liveMask = () => { const r = o.rendererRef.current; if (r && subjMask.current && brush.mode !== 'object') { r.setMask(subjMask.current); o.onTexturesChanged(); } };
+  const liveMask = () => {
+    const r = o.rendererRef.current; if (!r) return;
+    if ((brush.mode === 'local-add' || brush.mode === 'local-erase') && localMask.current) { r.setLocalMask(localMask.current); r.localLive = true; o.onTexturesChanged(); return; }
+    if ((brush.mode === 'mask-add' || brush.mode === 'mask-erase') && subjMask.current) { r.setMask(subjMask.current); o.onTexturesChanged(); }
+  };
 
   const busyEl = busy && (
     <div className="ai-busy">
@@ -375,5 +564,5 @@ export function useAiController(o: Opts) {
     </Modal>
   );
 
-  return { ops, busyEl, dlEl, brush, setBrush, paintTarget, strokeEnd, liveMask, working, subjMask, objMask: getObjMask, hasObjectMask, setHasObjectMask };
+  return { ops, busyEl, dlEl, brush, setBrush, paintTarget, strokeEnd, strokeStart, setSource, sourceMark, canStroke, liveMask, working, subjMask, objMask: getObjMask, hasObjectMask, setHasObjectMask };
 }
