@@ -23,6 +23,8 @@ interface ElectronApi {
   onOpenFile(cb: (path: string) => void): void;
   version(): Promise<string>;
   pathForFile(f: File): string;
+  assetSave(docId: string, id: string, bytes: Uint8Array): Promise<void>;
+  assetLoad(docId: string, id: string): Promise<Uint8Array | null>;
 }
 
 const api: ElectronApi | undefined = (window as any).photoStudio;
@@ -101,6 +103,8 @@ export const platform = {
   async showInFolder(path: string) { if (api) await api.showInFolder(path); },
   async userDataPath() { return api ? api.userDataPath() : ''; },
   onOpenFile(cb: (path: string) => void) { api?.onOpenFile(cb); },
+  async assetSave(docId: string, id: string, bytes: Uint8Array) { if (api) await api.assetSave(docId, id, bytes); },
+  async assetLoad(docId: string, id: string): Promise<Uint8Array | null> { return api ? api.assetLoad(docId, id) : null; },
   async version() { return api ? api.version() : 'browser'; },
   pathForFile(f: File): string | null { try { return api ? api.pathForFile(f) || null : null; } catch { return null; } },
 };

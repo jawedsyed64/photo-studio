@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Renderer, Histogram } from '../engine/Renderer';
-import { EditState, clone, defaultState, defaultAdjust, normalizeState } from '../state/types';
+import { EditState, clone, defaultState, defaultAdjust, defaultAi, normalizeState, assetIds } from '../state/types';
+import { AssetStore } from '../ai/assets';
+import { useAiController } from '../ai/controller';
+import { AiPanel, BrushOverlay } from './panels/AiPanel';
 import { Icon, Planned, toast, useLatest } from './common';
 import { AdjustPanel } from './panels/AdjustPanel';
 import { CurvesPanel } from './panels/CurvesPanel';
@@ -21,13 +24,14 @@ export interface Doc {
   state: EditState;
   projectPath: string | null;
   createdAt: number;
+  assets?: Record<string, Uint8Array>;
 }
 
 export interface RecentItem { id: string; name: string; imagePath: string | null; projectPath: string | null; thumb: string; editedAt: number }
 
 type Tool = 'ai' | 'adjust' | 'color' | 'detail' | 'retouch' | 'effects' | 'filters' | 'text' | 'stickers' | 'frames' | 'crop' | 'history';
 const TOOLS: { k: Tool; label: string; icon: string; phase?: number; pro?: boolean }[] = [
-  { k: 'ai', label: 'AI Tools', icon: 'ai', phase: 3 },
+  { k: 'ai', label: 'AI Tools', icon: 'ai' },
   { k: 'adjust', label: 'Adjustments', icon: 'sliders' },
   { k: 'color', label: 'Color', icon: 'color', pro: true },
   { k: 'detail', label: 'Detail & Optics', icon: 'detail', pro: true },
@@ -42,7 +46,6 @@ const TOOLS: { k: Tool; label: string; icon: string; phase?: number; pro?: boole
 ];
 
 const PLANNED: Record<string, { title: string; items: string[]; note?: string }> = {
-  ai: { title: 'AI Tools', items: ['Background removal (offline model, transparent PNG)', 'Background replacement & library', 'AI enhancement and 2× / 4× upscaling (offline model)', 'Object removal with brush', 'Portrait & art styles (online, needs API key)'], note: 'AI tools come in Phase 3. Background removal and upscaling will run offline on your computer; generated backgrounds and art styles will use an online service and need an API key (Settings).' },
   retouch: { title: 'Portrait Retouching', items: ['Skin smoothing, blemish & acne removal', 'Red-eye, teeth whitening, eye enhancement', 'Healing brush, clone stamp, spot removal', 'Local adjustment brush'] },
   effects: { title: 'Creative Effects', items: ['Film & vintage looks, light leaks', 'Glitch, bokeh, soft glow, tilt-shift', 'Double exposure, colour splash', 'Artistic filters (oil, watercolour, sketch)'] },
   text: { title: 'Text & Typography', items: ['Fonts, size, bold/italic, colour', 'Spacing, shadows, outlines, labels', 'Curved text, rotation'] },
@@ -51,6 +54,7 @@ const PLANNED: Record<string, { title: string; items: string[]; note?: string }>
 };
 
 const GROUPS: { k: string; label: string; test: (s: EditState) => boolean; reset: (s: EditState) => void }[] = [
+  { k: 'ai', label: 'AI layers', test: s => JSON.stringify(s.ai) !== JSON.stringify(defaultAi()), reset: s => { s.ai = defaultAi(); } },
   { k: 'adjust', label: 'Basic adjustments', test: s => JSON.stringify(s.adjust) !== JSON.stringify(defaultAdjust()), reset: s => { s.adjust = defaultAdjust(); } },
   { k: 'curves', label: 'Curves', test: s => JSON.stringify(s.curves) !== JSON.stringify(defaultState().curves), reset: s => { s.curves = defaultState().curves; } },
   { k: 'hsl', label: 'HSL', test: s => JSON.stringify(s.hsl) !== JSON.stringify(defaultState().hsl), reset: s => { s.hsl = defaultState().hsl; } },
@@ -72,10 +76,11 @@ interface Props {
   onHome: () => void;
   onOpen: () => void;
   onDocSaved: (patch: Partial<Doc>) => void;
+  onNewDoc: (bytes: Uint8Array, name: string, state: EditState, assets: Record<string, Uint8Array>) => void;
   initialTool?: string;
 }
 
-export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved, initialTool }: Props) {
+export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved, onNewDoc, initialTool }: Props) {
   const pro = settings.mode === 'pro';
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -100,6 +105,9 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
   const commitTimer = useRef<any>(null);
   const curRef = useLatest(cur);
   const histRef = useLatest(hist);
+  const assets = useMemo(() => new AssetStore(doc.id, doc.assets), [doc.id]);
+  const [texVersion, setTexVersion] = useState(0);
+  useEffect(() => { if (doc.assets) for (const [k, v] of Object.entries(doc.assets)) platform.assetSave(doc.id, k, v).catch(() => {}); }, [doc.id]);
 
   // ---------- renderer setup ----------
   useEffect(() => {
@@ -151,9 +159,17 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
   const undo = () => { if (commitTimer.current) { commit(); setTimeout(() => jump(histRef.current.index - 1), 0); } else jump(hist.index - 1); };
   const redo = () => jump(hist.index + 1);
 
+  // ---------- AI ----------
+  const aiCtl = useAiController({
+    docId: doc.id, docName: doc.name, loaded: doc.loaded as any, assets, rendererRef, ready, state: cur,
+    getState: () => curRef.current, setStateLabeled, onNewDoc, onTexturesChanged: () => setTexVersion(v => v + 1),
+  });
+  const brushOn = !!aiCtl.brush.mode;
+  useEffect(() => { if (tool !== 'ai' && aiCtl.brush.mode) aiCtl.setBrush({ ...aiCtl.brush, mode: null }); }, [tool]);
+
   // ---------- view geometry ----------
   const r = rendererRef.current;
-  const [OW, OH] = r ? r.orientedSize(cur) : [doc.loaded.width, doc.loaded.height];
+  const [OW, OH] = r ? r.orientedSize(brushOn ? defaultState() : cur) : [doc.loaded.width, doc.loaded.height];
   const cropMode = tool === 'crop';
   useEffect(() => {
     if (cropMode) {
@@ -168,8 +184,9 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
     let s = preview || cur;
     if (without) { s = clone(s); GROUPS.find(g => g.k === without)!.reset(s); }
     if (cropMode) { s = clone(s); s.geometry.crop = { ...cropFrame }; }
+    if (brushOn) { s = clone(s); s.geometry = defaultState().geometry; s.optics = defaultState().optics; }
     return s;
-  }, [preview, cur, cropMode, cropFrame, without]);
+  }, [preview, cur, cropMode, cropFrame, without, brushOn]);
 
   const outW = Math.max(1, Math.round(OW * display.geometry.crop.w)), outH = Math.max(1, Math.round(OH * display.geometry.crop.h));
   const fitScale = Math.min((size.w - 40) / outW, (size.h - 40) / outH);
@@ -190,13 +207,13 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
       const sp = showOrig ? 1.01 : compare && !cropMode ? split : -1;
       try { r.render(display, Math.round(visW * dpr), Math.round(visH * dpr), sp, view); } catch (e) { console.error(e); }
     });
-  }, [ready, display, visL, visT, visW, visH, ix, iy, dw, dh, showOrig, compare, split, cropMode]);
+  }, [ready, display, visL, visT, visW, visH, ix, iy, dw, dh, showOrig, compare, split, cropMode, texVersion]);
 
   useEffect(() => {
     if (!ready || !r) return;
     const t = setTimeout(() => { try { setHisto(r.histogram(preview || cur)); } catch { /* ignore */ } }, 160);
     return () => clearTimeout(t);
-  }, [ready, cur, preview]);
+  }, [ready, cur, preview, texVersion]);
 
   // ---------- autosave & recent ----------
   const makeThumb = useCallback(async () => {
@@ -244,7 +261,11 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
       state: curRef.current,
       history: histRef.current.entries.slice(-60).map(e => ({ label: e.label, t: e.t, state: e.state })),
       image: doc.bytes.length <= 40 * 1024 * 1024 ? toBase64(doc.bytes) : null,
+      assets: {} as Record<string, string>,
     };
+    const ids = new Set<string>([...assetIds(curRef.current), ...histRef.current.entries.slice(-60).flatMap(e => assetIds(e.state))]);
+    const ab = await assets.export([...ids]);
+    for (const [k, v] of Object.entries(ab)) proj.assets[k] = toBase64(v);
     const p = await platform.saveText(doc.name.replace(/\.[^.]+$/, '') + '.pstudio', JSON.stringify(proj), [{ name: 'Photo Studio project', extensions: ['pstudio'] }], saveAs ? null : doc.projectPath);
     if (p) { onDocSaved({ projectPath: p }); toast('Project saved', 'ok'); saveRecent(); }
   };
@@ -270,11 +291,11 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
   };
 
   // ---------- copy / paste settings ----------
-  const copySettings = () => { const s = clone(cur); platform.set('clipboard', { ...s, geometry: undefined }); toast('Edit settings copied'); };
+  const copySettings = () => { const s = clone(cur); platform.set('clipboard', { ...s, geometry: undefined, ai: undefined }); toast('Edit settings copied'); };
   const pasteSettings = async () => {
     const c = await platform.get<any>('clipboard', null);
     if (!c) return toast('Nothing copied yet');
-    update('Paste settings', s => { const g = s.geometry; Object.assign(s, normalizeState({ ...c, geometry: g })); });
+    update('Paste settings', s => { const g = s.geometry, a = s.ai; Object.assign(s, normalizeState({ ...c, geometry: g, ai: a })); });
   };
 
   // ---------- zoom ----------
@@ -385,10 +406,10 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
 
         {/* ---------- canvas ---------- */}
         <div className={'canvas-wrap' + (zoom !== 'fit' ? ' pannable' : '')} ref={wrapRef} onWheel={onWheel}
-          onPointerDown={e => { if (cropMode || zoom === 'fit' || (e.target as HTMLElement).closest('.split-handle')) return; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); panDrag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y }; }}
+          onPointerDown={e => { if (cropMode || zoom === 'fit' || (e.target as HTMLElement).closest('.split-handle') || (brushOn && e.button !== 1)) return; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); panDrag.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y }; }}
           onPointerMove={e => { const d = panDrag.current; if (d) setPan({ x: d.px + e.clientX - d.x, y: d.py + e.clientY - d.y }); }}
           onPointerUp={() => (panDrag.current = null)}
-          onDoubleClick={() => { if (!cropMode) zoom === 'fit' ? zoomTo(1) : setZoom('fit'); }}>
+          onDoubleClick={() => { if (!cropMode && !brushOn) zoom === 'fit' ? zoomTo(1) : setZoom('fit'); }}>
           <div className="checker" style={{ left: visL, top: visT, width: visW, height: visH }} />
           <canvas ref={canvasRef} className="view" style={{ left: visL, top: visT, width: visW, height: visH }} />
           {compare && !cropMode && (
@@ -403,11 +424,16 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
             </>
           )}
           {showOrig && <div className="ba-label" style={{ left: 12, top: 12 }}>Original</div>}
+          {brushOn && ready && (
+            <BrushOverlay box={{ x: ix, y: iy, w: dw, h: dh }} mode={aiCtl.brush.mode} size={aiCtl.brush.size} soft={aiCtl.brush.soft}
+              target={aiCtl.brush.mode === 'object' ? aiCtl.objMask() : aiCtl.subjMask.current} showMask={aiCtl.brush.mode === 'object' ? 'object' : 'subject'}
+              onStroke={() => { if (aiCtl.brush.mode !== 'object') aiCtl.liveMask(); }} onEnd={aiCtl.strokeEnd} />
+          )}
           {cropMode && ready && (
             <CropOverlay box={{ x: ix, y: iy, w: dw, h: dh }} frame={cropFrame} crop={cur.geometry.crop} ratio={ratio} oriented={[OW, OH]}
               onChange={c => update('Crop', s => { s.geometry.crop = c; })} />
           )}
-          <div className="canvas-info">{outW} × {outH}px{preview ? ' · preview' : ''}{without ? ' · without ' + GROUPS.find(g => g.k === without)?.label.toLowerCase() : ''}</div>
+          <div className="canvas-info">{outW} × {outH}px{brushOn ? ' · painting (middle mouse button to pan)' : ''}{preview ? ' · preview' : ''}{without ? ' · without ' + GROUPS.find(g => g.k === without)?.label.toLowerCase() : ''}</div>
         </div>
 
         {/* ---------- right sidebar ---------- */}
@@ -415,6 +441,7 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
           <HistogramView hist={histo} />
           <div className="panel-title">{TOOLS.find(t => t.k === tool)?.label}</div>
           <div className="panel-scroll">
+            {tool === 'ai' && <AiPanel state={cur} update={update} ops={aiCtl.ops} brush={aiCtl.brush} setBrush={aiCtl.setBrush} />}
             {tool === 'adjust' && <AdjustPanel state={cur} update={update} pro={pro} onAuto={autoEnhance} />}
             {tool === 'color' && <>
               <div className="tabs">
@@ -447,7 +474,9 @@ export function Editor({ doc, settings, setSettings, onHome, onOpen, onDocSaved,
       </div>
 
       {modal === 'export' && r && <ExportDialog renderer={r} state={cur} name={doc.name} settings={settings} onClose={() => setModal(null)} sourceSize={doc.loaded.scaledFrom} onSettings={setSettings} />}
-      {modal === 'settings' && <SettingsDialog settings={settings} onChange={setSettings} onClose={() => setModal(null)} />}
+      {modal === 'settings' && <SettingsDialog settings={settings} onChange={setSettings} onClose={() => { setModal(null); aiCtl.ops.refreshKey(); }} />}
+      {aiCtl.busyEl}
+      {aiCtl.dlEl}
     </div>
   );
 }

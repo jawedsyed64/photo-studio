@@ -48,7 +48,7 @@ export function ExportDialog({ renderer, state, name, settings, onClose, sourceS
   else if (sizeMode === 'custom') { W = cw; H = ch; }
   else if (sizeMode === 'percent') { W = Math.round(ow * pct / 100); H = Math.round(oh * pct / 100); }
   W = Math.max(1, Math.min(renderer.maxSize, W)); H = Math.max(1, Math.min(renderer.maxSize, H));
-  const transparent = state.geometry.fill === 'transparent' && (state.geometry.crop.x < 0 || state.geometry.crop.y < 0 || state.geometry.crop.x + state.geometry.crop.w > 1 || state.geometry.crop.y + state.geometry.crop.h > 1);
+  const transparent = (state.ai.bgMode === 'transparent' && !!state.ai.maskId) || state.geometry.fill === 'transparent' && (state.geometry.crop.x < 0 || state.geometry.crop.y < 0 || state.geometry.crop.x + state.geometry.crop.w > 1 || state.geometry.crop.y + state.geometry.crop.h > 1);
   useEffect(() => setEst(null), [format, quality, W, H]);
 
   const encode = async () => encodeImage(await renderForExport(renderer, state, W, H), format, quality);
@@ -82,7 +82,7 @@ export function ExportDialog({ renderer, state, name, settings, onClose, sourceS
         <label>Format
           <div className="seg">{(['jpeg', 'png', 'webp', 'tiff'] as const).map(f => <button key={f} className={format === f ? 'on' : ''} onClick={() => setFormat(f)}>{f === 'jpeg' ? 'JPEG' : f.toUpperCase()}</button>)}</div>
         </label>
-        {transparent && format !== 'png' && format !== 'webp' && format !== 'tiff' && <div className="warn">Your canvas has transparent areas. Choose PNG to keep transparency (JPEG fills it with white).</div>}
+        {transparent && format !== 'png' && format !== 'webp' && format !== 'tiff' && <div className="warn">Your photo has transparent areas. Choose PNG to keep transparency (JPEG fills it with white).</div>}
         {(format === 'jpeg' || format === 'webp') && (
           <label>Quality: {quality}<input type="range" min={10} max={100} value={quality} onChange={e => setQuality(+e.target.value)} /></label>
         )}
@@ -139,8 +139,8 @@ export function SettingsDialog({ settings, onChange, onClose }: { settings: AppS
         </div></label>
         <div className="muted small">Beginner mode shows simple sliders and presets. Professional mode adds curves, HSL, colour grading, detail and lens controls.</div>
         <label className="row gap"><input type="checkbox" checked={settings.autosave} onChange={e => onChange({ ...settings, autosave: e.target.checked })} /> Save my edits automatically (crash recovery)</label>
-        <h3>AI services (used from Phase 3)</h3>
-        <div className="muted small">Manual editing works fully offline. Online AI features (background generation, art styles) will use a Replicate account and API key. The key is encrypted with Windows' secure storage and never shown again.</div>
+        <h3>AI services</h3>
+        <div className="muted small">Manual editing and the offline AI tools (background removal, object removal, enhance, upscale) need no account. Online AI features (art styles, AI edit, background generation) use your own Replicate account and API key from replicate.com. The key is encrypted with Windows' secure storage and never shown again.</div>
         {isDesktop ? (
           <div className="row gap">
             <input className="text grow" type="password" placeholder={hasKey ? '•••••••• (saved)' : 'Replicate API key'} value={key} onChange={e => setKey(e.target.value)} />

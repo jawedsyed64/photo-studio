@@ -50,6 +50,15 @@ uniform sampler2D uBlurS;  // small radius (sharpen / texture)
 uniform sampler2D uBlurN;  // noise reduction radius
 uniform sampler2D uBlurL;  // large radius (clarity / dehaze)
 uniform sampler2D uCurve;  // 256x1 combined curves LUT
+uniform sampler2D uMask;   // subject mask (alpha), source space, mipmapped
+uniform sampler2D uBg;     // background image, output space, mipmapped
+uniform sampler2D uStyle;  // AI style layer, source space
+uniform float uMaskOn, uStyleOn, uStyleMix;
+uniform int uBgMode;       // 0 keep 1 transparent 2 colour 3 gradient 4 image 5 blur
+uniform vec3 uBgColor, uBgColor2;
+uniform int uBgGrad;       // 0 linear 1 radial
+uniform float uBgBlur, uFeather, uShift, uHarmAmt, uShadow, uBgAspect;
+uniform vec3 uHarm;
 
 // geometry
 uniform vec4 uCrop;          // x y w h in oriented normalized coords
@@ -171,6 +180,19 @@ void main() {
 
   vec3 col = vec3(rr, base.g, bb);
   float alpha = base.a;
+
+  // --- AI layers ---
+  float m = 1.0;
+  if (uMaskOn > 0.5) {
+    float mr = textureLod(uMask, s, uFeather * 4.0).a;
+    float c = 0.5 - uShift * 0.4, w = 0.02 + uFeather * 0.45;
+    m = smoothstep(c - w, c + w, mr);
+  }
+  if (uStyleOn > 0.5) col = mix(col, texture(uStyle, s).rgb, uStyleMix);
+  if (uMaskOn > 0.5 && uBgMode == 5) {
+    vec3 bl = textureLod(uImg, s, 1.0 + uBgBlur * 6.0).rgb;
+    col = mix(bl, col, m);
+  }
 
   // --- noise reduction ---
   if (uLumaNR > 0.0) {
@@ -316,6 +338,32 @@ void main() {
   }
 
   col = clamp(col, 0.0, 1.0);
+
+  // --- background replacement ---
+  if (uMaskOn > 0.5 && uBgMode >= 1 && uBgMode <= 4) {
+    if (uBgMode == 1) alpha *= m;
+    else {
+      vec3 bg;
+      if (uBgMode == 2) bg = uBgColor;
+      else if (uBgMode == 3) {
+        float asp = uOutSize.x / uOutSize.y;
+        float t = uBgGrad == 1 ? smoothstep(0.0, 0.9, length((uv - vec2(0.5, 0.42)) * vec2(asp, 1.0)) / max(asp, 1.0) * 1.3) : uv.y;
+        bg = mix(uBgColor, uBgColor2, t);
+      } else {
+        float ao = uOutSize.x / uOutSize.y;
+        vec2 bu = uv;
+        if (uBgAspect > ao) bu.x = 0.5 + (uv.x - 0.5) * ao / uBgAspect; else bu.y = 0.5 + (uv.y - 0.5) * uBgAspect / ao;
+        bg = textureLod(uBg, bu, uBgBlur * 6.0).rgb;
+      }
+      bg = mix(bg, clamp(bg * uHarm, 0.0, 1.0), uHarmAmt);
+      if (uShadow > 0.0) {
+        float sh = textureLod(uMask, s - vec2(0.012, 0.03), 4.5).a;
+        bg *= 1.0 - uShadow * 0.65 * sh * (1.0 - m);
+      }
+      col = mix(bg, col, m);
+      alpha = 1.0;
+    }
+  }
   if (uSplit >= 0.0) {
     if (abs(uv.x - uSplit) < fwidth(uv.x) * 1.5) col = vec3(1.0);
   }

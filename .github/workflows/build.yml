@@ -23,6 +23,15 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Cache AI models
+        uses: actions/cache@v4
+        with:
+          path: ai-models
+          key: ai-models-${{ hashFiles('electron/ai/core.js') }}
+
+      - name: AI self-test (real models, real inference)
+        run: node scripts/ai-selftest.cjs ai-models
+
       - name: Build editor
         run: npm run build
 

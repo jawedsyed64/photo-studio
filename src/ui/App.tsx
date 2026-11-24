@@ -26,7 +26,7 @@ const TILES: { k: string; label: string; desc: string; icon: string; phase?: num
   { k: 'manual', label: 'Manual Photo Editing', desc: 'Light, colour, detail, crop', icon: 'sliders' },
   { k: 'color', label: 'Color Correction', desc: 'Curves, HSL, colour grading', icon: 'color' },
   { k: 'presets', label: 'Presets & Filters', desc: '21 professional looks', icon: 'filters' },
-  { k: 'ai', label: 'AI Photo Editing', desc: 'Background, upscale, objects', icon: 'ai', phase: 3 },
+  { k: 'ai', label: 'AI Photo Editing', desc: 'Background, objects, upscale, styles', icon: 'ai' },
   { k: 'portrait', label: 'Portrait Retouching', desc: 'Skin, eyes, healing brush', icon: 'portrait', phase: 4 },
   { k: 'restore', label: 'Photo Restoration', desc: 'Repair & colourise old photos', icon: 'restore', phase: 4 },
   { k: 'effects', label: 'Creative Effects', desc: 'Film, light leaks, text', icon: 'effects', phase: 5 },
@@ -67,13 +67,13 @@ export function App() {
   }, []);
 
   // ---------- opening ----------
-  const openBytes = async (f: PickedFile, opts: { id?: string; state?: any; projectPath?: string | null; tool?: string; history?: any } = {}) => {
+  const openBytes = async (f: PickedFile, opts: { id?: string; state?: any; projectPath?: string | null; tool?: string; history?: any; assets?: Record<string, Uint8Array> } = {}) => {
     const ext = extOf(f.name);
     if (RAW_EXT.includes(ext)) { toast(`RAW camera files (.${ext}) are planned for a later phase. Please convert to JPEG or TIFF first.`, 'error'); return; }
     setBusy('Opening ' + f.name + '…');
     try {
       const loaded = await decodeImage(f.bytes, f.name, MAX_TEX);
-      const d: Doc = { id: opts.id || uid(), name: f.name, path: f.path, bytes: f.bytes, loaded, state: normalizeState(opts.state || defaultState()), projectPath: opts.projectPath ?? null, createdAt: Date.now() };
+      const d: Doc = { id: opts.id || uid(), name: f.name, path: f.path, bytes: f.bytes, loaded, state: normalizeState(opts.state || defaultState()), projectPath: opts.projectPath ?? null, createdAt: Date.now(), assets: opts.assets };
       setInitialTool(opts.tool);
       setDoc(null);
       setTimeout(() => setDoc(d), 0);
@@ -96,7 +96,9 @@ export function App() {
       let bytes: Uint8Array | null = p.image ? fromBase64(p.image) : null;
       if (!bytes && p.imagePath && await platform.exists(p.imagePath)) bytes = await platform.readFile(p.imagePath);
       if (!bytes) throw new Error('The original photo for this project could not be found' + (p.imagePath ? ': ' + p.imagePath : ''));
-      await openBytes({ path: p.imagePath || null, name: p.name || 'photo.jpg', bytes }, { id: typeof p.id === 'string' ? p.id : undefined, state: p.state, projectPath: path });
+      const assets: Record<string, Uint8Array> = {};
+      if (p.assets && typeof p.assets === 'object') for (const [k, v] of Object.entries(p.assets)) if (typeof v === 'string') assets[k] = fromBase64(v);
+      await openBytes({ path: p.imagePath || null, name: p.name || 'photo.jpg', bytes }, { id: typeof p.id === 'string' ? p.id : undefined, state: p.state, projectPath: path, assets });
     } catch (e: any) { toast(e.message || String(e), 'error'); }
   };
 
@@ -146,6 +148,7 @@ export function App() {
       case 'new': case 'open': case 'manual': return pick('adjust');
       case 'color': setSettings({ ...settings, mode: 'pro' }); return pick('color');
       case 'presets': return pick('filters');
+      case 'ai': return pick('ai');
       case 'project': return platform.openProject().then(p => p && openProjectText(p.text, p.path));
       case 'import': return importMany();
       case 'export': return toast('Open a photo first, then use the Export button in the editor (Ctrl+E).');
@@ -177,7 +180,8 @@ export function App() {
     <div className="app">
       {doc ? (
         <Editor key={doc.id} doc={doc} settings={settings} setSettings={setSettings} initialTool={initialTool}
-          onHome={() => { setDoc(null); loadRecent(); }} onOpen={() => pick()} onDocSaved={p => setDoc(d => d ? { ...d, ...p } : d)} />
+          onHome={() => { setDoc(null); loadRecent(); }} onOpen={() => pick()} onDocSaved={p => setDoc(d => d ? { ...d, ...p } : d)}
+          onNewDoc={(bytes, name, state, assets) => openBytes({ path: null, name, bytes }, { state, assets, tool: 'ai' })} />
       ) : (
         <div className="home">
           <div className="home-head">

@@ -2,7 +2,7 @@
 
 A modern Windows desktop photo editor. It has GPU-accelerated, non-destructive editing, professional colour tools and presets, with a simple Beginner mode and a full Professional mode.
 
-> **Status:** Phase 1 (Core Photo Editor) and Phase 2 (Professional Color Editing) are working. AI tools, retouching, creative effects, layers and batch editing are shown in the app as **"Soon / Phase N"** and do not run yet.
+> **Status:** Phases 1–3 work: core editor, professional colour editing and AI editing. Retouching, creative effects, layers and batch editing are shown in the app as **"Soon / Phase N"** and do not run yet.
 
 ## Download
 
@@ -33,7 +33,25 @@ Windows may show a SmartScreen warning because the app is not code-signed. Click
 | Export | JPEG, PNG (transparent), WebP, TIFF; quality, original / long edge / custom / percent size, file size estimate, output folder, file naming |
 | Interface | Windows 11 style, dark & light themes, Beginner & Professional modes, tooltips, zoom (wheel, 100 %, fit, full screen), pan |
 
-Everything above works **offline**. RAW camera files and EXIF metadata copying are not supported yet.
+Everything above works **offline**.
+
+### AI tools (Phase 3)
+
+| Tool | How it runs | Model (downloaded on first use) |
+|---|---|---|
+| Background removal (people, hair, objects) + edge softness / shift + brush refine | Offline | IS-Net (170 MB, best) or Silueta (42 MB, fast) |
+| Background replacement: transparent, colour, gradient library, your own photo, blur, match lighting, shadow | Offline | uses the mask above |
+| Background generation from a text prompt | Online (Replicate, FLUX schnell) | needs API key |
+| Object removal with brush | Offline | LaMa (198 MB) |
+| AI enhance (detail, noise, JPEG artefacts, same size, adjustable strength) | Offline | Real-ESRGAN x4plus |
+| HD upscale 2× / 4× / 8× (opens as a new photo) | Offline | Real-ESRGAN x2plus / x4plus |
+| Portrait & art styles (13), AI edit by description, object replacement | Online (Replicate, FLUX Kontext Pro) | needs API key |
+
+Offline models run in a separate process with ONNX Runtime. They use the graphics card through DirectML when it works, and the CPU otherwise. Downloads are checked against their SHA-256 and can be removed in **AI Tools → Models**. All AI results are non-destructive layers (masks, patches, style layer) that are saved inside the project and can be undone.
+
+**Online features:** create an account at replicate.com, add billing, create an API token, and paste it in **Settings → AI services**. Replicate charges per generated image. The key is encrypted with Windows' secure storage and only used by the main process.
+
+Every build runs an AI self-test on GitHub (`scripts/ai-selftest.cjs`). It downloads all offline models, verifies their checksums, and runs real inference. RAW camera files and EXIF metadata copying are not supported yet.
 
 ## Keyboard shortcuts
 
@@ -53,6 +71,7 @@ Everything above works **offline**. RAW camera files and EXIF metadata copying a
 
 ```
 electron/main.js       Main process: windows, file dialogs, file I/O, settings store, encrypted API keys, crash handling
+electron/ai/            AI: model registry & processing (core.js), inference worker (utility process), downloads & Replicate (services.js)
 electron/preload.js    Safe bridge (contextIsolation, sandbox) exposed as window.photoStudio
 src/engine/            Rendering engine (no UI)
   Renderer.ts          WebGL2 pipeline: source texture + blur pyramids → single main shader → screen or export
@@ -60,6 +79,7 @@ src/engine/            Rendering engine (no UI)
                        clarity, dehaze, white balance, exposure, tone, HSL, curves LUT, grading, vignette, grain
   curves.ts            Monotone cubic spline → 256-entry LUT
   codecs.ts            TIFF decode/encode, export encoding, resizing, thumbnails
+src/ai/                AI controller (working image, masks, brushes, operations), asset store
 src/state/             Edit state model (non-destructive), presets
 src/ui/                React UI: dashboard, editor, panels, dialogs
 ```
@@ -78,7 +98,6 @@ npm run dist       # create Windows installer + portable exe in release/
 
 ## Roadmap
 
-- **Phase 3 – AI editing:** background removal and upscaling (offline ONNX models), object removal, background replacement, AI enhancement. Generated backgrounds and portrait/art styles will use an online API (Replicate; key stored encrypted via Settings).
 - **Phase 4 – Retouching & restoration:** skin smoothing, blemish removal, healing brush, clone stamp, scratch repair, colourisation.
 - **Phase 5 – Creative studio:** film/retro effects, light leaks, double exposure, text, stickers, frames.
 - **Phase 6 – Productivity:** layers & masks, blending modes, batch editing, AI editing assistant, RAW import.

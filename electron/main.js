@@ -2,6 +2,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const aiServices = require('./ai/services');
 
 const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif', 'tif', 'tiff'];
 let win = null;
@@ -132,6 +133,13 @@ ipcMain.handle('show-in-folder', async (_e, p) => { if (p && fs.existsSync(p)) s
 ipcMain.handle('join-path', async (_e, ...parts) => path.join(...parts));
 ipcMain.handle('user-data', async () => app.getPath('userData'));
 ipcMain.handle('version', async () => app.getVersion());
+
+// ---------- assets (AI masks, retouch patches, generated images) ----------
+const assetDir = docId => { const d = path.join(app.getPath('userData'), 'assets', String(docId).replace(/[^a-zA-Z0-9_-]/g, '_')); fs.mkdirSync(d, { recursive: true }); return d; };
+const assetFile = (docId, id) => path.join(assetDir(docId), String(id).replace(/[^a-zA-Z0-9_-]/g, '_') + '.bin');
+ipcMain.handle('asset-save', async (_e, docId, id, bytes) => { await fs.promises.writeFile(assetFile(docId, id), Buffer.from(bytes)); });
+ipcMain.handle('asset-load', async (_e, docId, id) => { try { return new Uint8Array(await fs.promises.readFile(assetFile(docId, id))); } catch { return null; } });
+aiServices.register(() => win);
 
 // ---------- lifecycle ----------
 if (!app.requestSingleInstanceLock()) {

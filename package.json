@@ -1,8 +1,8 @@
 {
   "name": "photo-studio",
   "productName": "Photo Studio",
-  "version": "0.2.0",
-  "description": "Professional photo editing studio for Windows - GPU editing, curves, HSL, colour grading, presets",
+  "version": "0.3.0",
+  "description": "Professional photo editing studio for Windows - GPU editing, colour tools, presets and AI (background removal, object removal, upscaling, styles)",
   "author": "jawedsyed64",
   "license": "MIT",
   "main": "electron/main.js",
@@ -11,9 +11,12 @@
     "dev": "node scripts/build.mjs && electron .",
     "start": "electron .",
     "typecheck": "tsc --noEmit",
-    "dist": "npm run build && electron-builder --win nsis portable --publish never"
+    "dist": "npm run build && electron-builder --win nsis portable --publish never",
+    "ai-selftest": "node scripts/ai-selftest.cjs ai-models"
   },
-  "dependencies": {},
+  "dependencies": {
+    "onnxruntime-node": "^1.20.1"
+  },
   "devDependencies": {
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -27,20 +30,33 @@
   "build": {
     "appId": "com.jawedsyed64.photostudio",
     "productName": "Photo Studio",
-    "directories": { "output": "release", "buildResources": "build" },
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
     "files": [
       "electron/**/*",
       "dist/renderer/**/*",
       "!dist/renderer/*.map",
       "build/icon.png",
-      "package.json"
+      "package.json",
+      "!node_modules/onnxruntime-node/bin/napi-v*/linux/**",
+      "!node_modules/onnxruntime-node/bin/napi-v*/darwin/**"
     ],
     "fileAssociations": [
-      { "ext": "pstudio", "name": "Photo Studio Project", "description": "Photo Studio project", "role": "Editor" }
+      {
+        "ext": "pstudio",
+        "name": "Photo Studio Project",
+        "description": "Photo Studio project",
+        "role": "Editor"
+      }
     ],
     "win": {
       "icon": "build/icon.png",
-      "target": ["nsis", "portable"]
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -50,6 +66,11 @@
       "shortcutName": "Photo Studio",
       "artifactName": "PhotoStudio-Setup-${version}.${ext}"
     },
-    "portable": { "artifactName": "PhotoStudio-Portable-${version}.${ext}" }
+    "portable": {
+      "artifactName": "PhotoStudio-Portable-${version}.${ext}"
+    },
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**"
+    ]
   }
 }

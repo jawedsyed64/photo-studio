@@ -34,6 +34,9 @@ export class Renderer {
   private small?: Target; private tSmall?: Target; private blurL?: Target;
   private sharpRadius = -1;
   private vao: WebGLVertexArrayObject;
+  private maskTex: WebGLTexture; private bgTex: WebGLTexture; private styleTex: WebGLTexture;
+  hasMask = false; hasBg = false; hasStyle = false; bgAspect = 1;
+  harm: [number, number, number] = [1, 1, 1];
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -44,7 +47,22 @@ export class Renderer {
     this.copy = this.prog(COPY); this.blur = this.prog(BLUR); this.main = this.prog(MAIN);
     this.vao = gl.createVertexArray()!;
     this.curveTex = this.makeTex(256, 1);
+    this.maskTex = this.makeTex(1, 1); this.bgTex = this.makeTex(1, 1); this.styleTex = this.makeTex(1, 1);
   }
+
+  private upload(t: WebGLTexture, img: TexImageSource, mip: boolean) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    if (mip) { gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); }
+    else gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  }
+  /** Subject mask: alpha channel = subject. */
+  setMask(img: (TexImageSource & { width: number; height: number }) | null) { if (img) this.upload(this.maskTex, img, true); this.hasMask = !!img; }
+  setBackground(img: (TexImageSource & { width: number; height: number }) | null) { if (img) { this.upload(this.bgTex, img, true); this.bgAspect = img.width / img.height; } this.hasBg = !!img; }
+  setStyle(img: (TexImageSource & { width: number; height: number }) | null) { if (img) this.upload(this.styleTex, img, true); this.hasStyle = !!img; }
 
   private prog(fs: string): Prog {
     const gl = this.gl;
@@ -194,8 +212,8 @@ export class Renderer {
   private setMain(s: EditState, outW: number, outH: number, split: number, view: [number, number, number, number] = [0, 0, 1, 1]) {
     const gl = this.gl, m = this.main;
     gl.useProgram(m.p);
-    const tex = [this.src, this.blurS!.tex, this.blurN!.tex, this.blurL!.tex, this.curveTex];
-    const names = ['uImg', 'uBlurS', 'uBlurN', 'uBlurL', 'uCurve'];
+    const tex = [this.src, this.blurS!.tex, this.blurN!.tex, this.blurL!.tex, this.curveTex, this.maskTex, this.bgTex, this.styleTex];
+    const names = ['uImg', 'uBlurS', 'uBlurN', 'uBlurL', 'uCurve', 'uMask', 'uBg', 'uStyle'];
     tex.forEach((t, k) => { gl.activeTexture(gl.TEXTURE0 + k); gl.bindTexture(gl.TEXTURE_2D, t); this.i(m, names[k], k); });
 
     const g = s.geometry, a = s.adjust, d = s.detail, op = s.optics;
@@ -260,6 +278,26 @@ export class Renderer {
     this.f(m, 'uBlend', gr.blending / 100);
     this.f(m, 'uBalance', gr.balance / 100);
     this.f(m, 'uSplit', split);
+    const ai = s.ai;
+    const modes = ['keep', 'transparent', 'color', 'gradient', 'image', 'blur'];
+    const maskOn = this.hasMask && !!ai.maskId;
+    let mode = modes.indexOf(ai.bgMode);
+    if (mode === 4 && !(this.hasBg && ai.bgImageId)) mode = 0;
+    this.f(m, 'uMaskOn', maskOn ? 1 : 0);
+    this.i(m, 'uBgMode', mode);
+    const c1 = hexToRgba(ai.bgColor), c2 = hexToRgba(ai.bgColor2);
+    this.f(m, 'uBgColor', c1[0], c1[1], c1[2]);
+    this.f(m, 'uBgColor2', c2[0], c2[1], c2[2]);
+    this.i(m, 'uBgGrad', ai.bgGradient === 'radial' ? 1 : 0);
+    this.f(m, 'uBgBlur', ai.bgBlur / 100);
+    this.f(m, 'uFeather', ai.feather / 100);
+    this.f(m, 'uShift', ai.shift / 100);
+    this.f(m, 'uHarmAmt', ai.harmonize / 100);
+    this.f(m, 'uHarm', ...this.harm);
+    this.f(m, 'uShadow', ai.shadow / 100);
+    this.f(m, 'uBgAspect', this.bgAspect);
+    this.f(m, 'uStyleOn', this.hasStyle && ai.styleId ? 1 : 0);
+    this.f(m, 'uStyleMix', ai.styleMix / 100);
     this.f(m, 'uView', view[0], view[1], view[2], view[3]);
   }
 

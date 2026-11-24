@@ -76,7 +76,28 @@ export interface Geometry {
   fill: string;           // canvas expansion fill colour
 }
 
+export type BgMode = 'keep' | 'transparent' | 'color' | 'gradient' | 'image' | 'blur';
+export interface Patch { id: string; x: number; y: number; w: number; h: number }
+export interface AiState {
+  baseId: string | null;       // AI-enhanced base image (replaces the original as the starting point)
+  patches: Patch[];            // object-removal patches, in source pixel coordinates
+  maskId: string | null;       // subject mask from background removal (alpha = subject)
+  bgMode: BgMode;
+  bgColor: string;
+  bgColor2: string;
+  bgGradient: 'linear' | 'radial';
+  bgImageId: string | null;
+  bgBlur: number;     // 0..100
+  feather: number;    // 0..100 edge softness
+  shift: number;      // -100..100 contract / expand edge
+  harmonize: number;  // 0..100 match background light & colour to the subject
+  shadow: number;     // 0..100 drop shadow under the subject
+  styleId: string | null;  // AI style / AI edit result layer
+  styleMix: number;   // 0..100
+}
+
 export interface EditState {
+  ai: AiState;
   adjust: Adjust;
   detail: Detail;
   optics: Optics;
@@ -117,7 +138,13 @@ export const defaultGeometry = (): Geometry => ({
   crop: { x: 0, y: 0, w: 1, h: 1 }, aspect: 'free', fill: '#ffffff',
 });
 
+export const defaultAi = (): AiState => ({
+  baseId: null, patches: [], maskId: null, bgMode: 'keep', bgColor: '#ffffff', bgColor2: '#c8c8c8', bgGradient: 'radial',
+  bgImageId: null, bgBlur: 0, feather: 10, shift: 0, harmonize: 0, shadow: 0, styleId: null, styleMix: 100,
+});
+
 export const defaultState = (): EditState => ({
+  ai: defaultAi(),
   adjust: defaultAdjust(),
   detail: defaultDetail(),
   optics: defaultOptics(),
@@ -134,6 +161,7 @@ export function normalizeState(s: any): EditState {
   const d = defaultState();
   if (!s || typeof s !== 'object') return d;
   return {
+    ai: { ...d.ai, ...(s.ai || {}), patches: Array.isArray(s.ai?.patches) ? s.ai.patches : [] },
     adjust: { ...d.adjust, ...(s.adjust || {}) },
     detail: { ...d.detail, ...(s.detail || {}) },
     optics: { ...d.optics, ...(s.optics || {}) },
@@ -151,4 +179,10 @@ export function normalizeState(s: any): EditState {
 }
 
 /** Parts of a state that a preset carries (no geometry). */
-export type PresetSettings = Partial<Omit<EditState, 'geometry'>>;
+export type PresetSettings = Partial<Omit<EditState, 'geometry' | 'ai'>>;
+
+/** All asset ids a state refers to. */
+export function assetIds(s: EditState): string[] {
+  const a = s.ai; const ids = [a.baseId, a.maskId, a.bgImageId, a.styleId, ...a.patches.map(p => p.id)];
+  return ids.filter((x): x is string => !!x);
+}
